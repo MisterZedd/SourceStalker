@@ -79,7 +79,6 @@ git clone [repository-url] .
 
 4. Create required directories:
 ```cmd
-mkdir data
 mkdir config
 ```
 
