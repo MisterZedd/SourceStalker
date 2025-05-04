@@ -8,7 +8,7 @@ import sys
 from typing import Optional, Tuple, Dict
 from datetime import datetime
 
-from config_manager import ConfigManager
+from config_manager import ConfigManager, initialize_summoner_id
 from riot_api_client import RiotAPIClient
 from db_manager import DBManager
 from utils.gamemodes import get_queue_type
@@ -233,7 +233,7 @@ class SpectatorChecker:
                         # Validate summoner ID
                         if not self.config.riot.summoner_id or self.config.riot.summoner_id.strip() == '':
                             logger.warning("Summoner ID is empty, attempting to fetch it")
-                            success = await self.config_manager.initialize_summoner_id(self.api_client)
+                            success = await ConfigManager.initialize_summoner_id(self.api_client)
                             if not success:
                                 logger.error("Failed to get summoner ID. Waiting before retrying...")
                                 await asyncio.sleep(60)
