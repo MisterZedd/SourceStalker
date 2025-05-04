@@ -9,6 +9,7 @@ import logging
 import sys
 import argparse
 from pathlib import Path
+from riot_api_client import RiotAPIClient
 
 from config_manager import ConfigManager
 from spectator_checker import SpectatorChecker, initialize_spectator
@@ -101,6 +102,27 @@ class SourceStalkerBot:
     async def run(self):
         """Run the bot with improved error handling and reconnection logic."""
         await self.setup()
+
+        # Initialize the API client for config setup
+        api_client = RiotAPIClient(
+            api_key=self.config.riot.api_key,
+            region=self.config.riot.region,
+            platform=self.config.riot.platform
+        )
+        await api_client.initialize()
+        
+        # Initialize summoner ID if needed
+        if not self.config.riot.summoner_id:
+            logger.info("Summoner ID not found in config, attempting to fetch...")
+            success = await self.config_manager.initialize_summoner_id(api_client)
+            if success:
+                logger.info(f"Successfully initialized summoner ID: {self.config.riot.summoner_id}")
+                # Update the local config reference
+                self.config = self.config_manager.config
+            else:
+                logger.error("Failed to initialize summoner ID. Please check summoner name and tag.")
+        
+        await api_client.close()
         
         try:
             while True:
