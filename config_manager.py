@@ -153,6 +153,43 @@ class ConfigManager:
             return False, f"Invalid database path: {str(e)}"
 
         return True, "Configuration is valid"
+    
+    async def initialize_summoner_id(self, api_client) -> bool:
+        """Initialize summoner ID in configuration if missing"""
+        if self.config.riot.summoner_id:
+            return True
+            
+        try:
+            # Get account by Riot ID
+            account_data = await api_client.request(
+                f"/riot/account/v1/accounts/by-riot-id/{self.config.riot.summoner_name}/{self.config.riot.summoner_tag}",
+                use_platform=True
+            )
+            
+            if 'puuid' in account_data:
+                # Get summoner data by PUUID
+                summoner_data = await api_client.request(
+                    f"/lol/summoner/v4/summoners/by-puuid/{account_data['puuid']}"
+                )
+                
+                if 'id' in summoner_data:
+                    self.config.riot.summoner_id = summoner_data['id']
+                    
+                    # Save to config file
+                    config_dict = {
+                        'discord': asdict(self.config.discord),
+                        'riot': asdict(self.config.riot),
+                        'database': asdict(self.config.database),
+                        'messages': asdict(self.config.messages)
+                    }
+                    self.save_config_dict(config_dict)
+                    
+                    return True
+            
+            return False
+        except Exception as e:
+            logging.error(f"Failed to initialize summoner ID: {e}")
+            return False
 
     @property
     def config(self) -> Config:
