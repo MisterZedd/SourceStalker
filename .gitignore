@@ -16,3 +16,6 @@ htmlcov/
 .venv
 venv/
 ENV/
+
+#PNG files
+*.png

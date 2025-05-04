@@ -323,7 +323,14 @@ class RiotAPIClient:
     
     async def get_current_game(self, summoner_id: str, region: str = None) -> Dict:
         """Get current game information."""
-        endpoint = f"/lol/spectator/v5/active-games/by-summoner/{summoner_id}"
+        # Validate summoner_id to prevent malformed URLs
+        if not summoner_id or summoner_id.strip() == '':
+            logger.warning("Attempted to get current game with empty summoner ID")
+            return {'status': {'status_code': 400, 'message': 'Summoner ID is required'}}
+        
+        # Keep using v5 as shown in your documentation, but ensure proper URL formatting
+        endpoint = f"/lol/spectator/v5/active-games/by-summoner/{summoner_id.strip()}"
+        logger.debug(f"Requesting spectator data from endpoint: {endpoint}")
         return await self.request(endpoint, region_override=region)
     
     async def get_league_entries(self, summoner_id: str, region: str = None) -> List[Dict]:
