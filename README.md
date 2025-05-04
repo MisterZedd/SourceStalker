@@ -7,7 +7,7 @@ Before beginning the setup process, you'll need to install the following softwar
 1. **Docker Desktop for Windows**
    - Download from: https://www.docker.com/products/docker-desktop
    - System Requirements:
-     - Windows 10/11 Pro, Enterprise, or Education (64-bit)
+     - Windows 10/11
      - WSL 2 (Windows Subsystem for Linux)
      - Virtualization enabled in BIOS
 
