@@ -233,35 +233,9 @@ class SpectatorChecker:
                         # Validate summoner ID
                         if not self.config.riot.summoner_id or self.config.riot.summoner_id.strip() == '':
                             logger.warning("Summoner ID is empty, attempting to fetch it")
-                            try:
-                                # Try to get summoner info from summoner name and tag
-                                logger.info(f"Fetching summoner ID for {self.config.riot.summoner_name}#{self.config.riot.summoner_tag}")
-                                
-                                # First attempt to get the account info by Riot ID
-                                account_data = await self.api_client.request(
-                                    f"/riot/account/v1/accounts/by-riot-id/{self.config.riot.summoner_name}/{self.config.riot.summoner_tag}",
-                                    use_platform=True
-                                )
-                                
-                                if 'puuid' in account_data:
-                                    # Now get the summoner data using the PUUID
-                                    summoner_data = await self.api_client.request(
-                                        f"/lol/summoner/v4/summoners/by-puuid/{account_data['puuid']}"
-                                    )
-                                    
-                                    if 'id' in summoner_data:
-                                        self.config.riot.summoner_id = summoner_data['id']
-                                        logger.info(f"Updated summoner ID to: {summoner_data['id']}")
-                                    else:
-                                        logger.error(f"Failed to get summoner data: {summoner_data}")
-                                        await asyncio.sleep(60)
-                                        continue
-                                else:
-                                    logger.error(f"Failed to find account: {account_data}")
-                                    await asyncio.sleep(60)
-                                    continue
-                            except Exception as e:
-                                logger.error(f"Error fetching summoner ID: {e}")
+                            success = await self.config_manager.initialize_summoner_id(self.api_client)
+                            if not success:
+                                logger.error("Failed to get summoner ID. Waiting before retrying...")
                                 await asyncio.sleep(60)
                                 continue
                         
