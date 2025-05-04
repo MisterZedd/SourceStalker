@@ -444,52 +444,45 @@ class SpectatorChecker:
             # Clean up resources
             await self.api_client.close()
 
-async def initialize_spectator(channel) -> asyncio.Task:
+async def initialize_spectator(channel, config_manager=None) -> asyncio.Task:
     """
     Initialize and run the spectator checker.
     
     Args:
         channel: Discord channel to send messages to
+        config_manager: Optional configuration manager to reuse
         
     Returns:
         asyncio.Task: The running spectator checker task
     """
-    from pathlib import Path
-    from gui import launch_gui
-    
-    config_path = "config/config.json"
-    config_manager = ConfigManager(config_path)
+    if config_manager is None:
+        config_path = "config/config.json"
+        config_manager = ConfigManager(config_path)
     
     # Check if config file exists and has required fields
-    config_file = Path(config_path)
-    if not config_file.exists():
-        logger.warning(f"Config file not found at {config_path}")
-        logger.info("Launching GUI for configuration...")
-        # Create the config directory if it doesn't exist
-        config_file.parent.mkdir(parents=True, exist_ok=True)
-        # Launch GUI in a separate process
-        import threading
-        gui_thread = threading.Thread(target=launch_gui, args=(config_manager,))
-        gui_thread.daemon = True
-        gui_thread.start()
-        # Wait for configuration to complete
-        logger.info("Please complete the configuration using the GUI and restart the bot.")
-        # Return an empty task that does nothing
-        return asyncio.create_task(asyncio.sleep(0))
-    
-    # Check if riot config has required fields
+    config = config_manager.config
     if not all([
-        config_manager.config.riot.api_key,
-        config_manager.config.riot.summoner_name,
-        config_manager.config.riot.summoner_tag
+        config.riot.api_key,
+        config.riot.summoner_name,
+        config.riot.summoner_tag
     ]):
         logger.error("Required Riot API configuration is missing. Please configure the bot using the GUI.")
-        logger.info("Launching GUI for configuration...")
+        
+        # Launch GUI for configuration
+        from pathlib import Path
+        from gui import launch_gui
+        
+        config_file = Path("config/config.json")
+        if not config_file.exists():
+            config_file.parent.mkdir(parents=True, exist_ok=True)
+        
         import threading
         gui_thread = threading.Thread(target=launch_gui, args=(config_manager,))
         gui_thread.daemon = True
         gui_thread.start()
+        
         # Return an empty task that does nothing
+        logger.info("Please complete the configuration using the GUI and restart the bot.")
         return asyncio.create_task(asyncio.sleep(0))
     
     checker = SpectatorChecker(config_manager)

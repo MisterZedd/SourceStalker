@@ -345,14 +345,15 @@ class RiotAPIClient:
             return summoner_data['puuid']
         return None
     
-    async def get_current_game(self, summoner_id: str, puuid: str = None, region: str = None) -> Dict:
+    async def get_current_game(self, summoner_id: str = None, puuid: str = None, region: str = None) -> Dict:
         """Get current game information using PUUID if available, or summoner ID."""
+        # Validate that we have at least one ID
+        if not puuid and not summoner_id:
+            logger.warning("Neither summoner ID nor PUUID provided")
+            return {'status': {'status_code': 400, 'message': 'ID required'}}
+        
         # If PUUID is not provided, try to get it from summoner ID
-        if not puuid:
-            if not summoner_id:
-                logger.warning("Neither summoner ID nor PUUID provided")
-                return {'status': {'status_code': 400, 'message': 'ID required'}}
-                
+        if not puuid and summoner_id:
             puuid = await self.get_puuid_by_summoner_id(summoner_id, region)
             if not puuid:
                 logger.warning(f"Failed to get PUUID for summoner ID: {summoner_id}")
@@ -360,7 +361,7 @@ class RiotAPIClient:
         
         # Use v5 endpoint with PUUID
         endpoint = f"/lol/spectator/v5/active-games/by-summoner/{puuid}"
-        logger.info(f"Making spectator request with PUUID")
+        logger.info(f"Making spectator request with PUUID: {puuid}")
         
         return await self.request(endpoint, region_override=region)
     

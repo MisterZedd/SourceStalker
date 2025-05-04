@@ -9,7 +9,7 @@ import logging
 import sys
 import argparse
 from pathlib import Path
-from riot_api_client import RiotAPIClient
+from dataclasses import asdict
 
 from config_manager import ConfigManager
 from spectator_checker import SpectatorChecker, initialize_spectator
@@ -23,6 +23,9 @@ logging.basicConfig(
     stream=sys.stdout
 )
 logger = logging.getLogger(__name__)
+
+# Your Discord user ID for the owner check
+OWNER_ID = 12345678901234567  # Replace with your actual ID
 
 class SourceStalkerBot:
     """
@@ -59,21 +62,50 @@ class SourceStalkerBot:
 
     def register_commands(self):
         """Register slash commands."""
+        # Clear existing commands first to avoid duplicates
+        self.tree.clear_commands(guild=None)
+        
+        # Add commands from CommandHandler
         self.tree.add_command(self.command_handler.stalkmatches_command)
         self.tree.add_command(self.command_handler.livegame_command)
         self.tree.add_command(self.command_handler.stalkrank_command)
+        
+        # Add sync command
+        @self.tree.command(name="synccommands", description="Sync slash commands (owner only)")
+        async def sync_command(interaction: discord.Interaction):
+            # Check if the user is the owner
+            if interaction.user.id == OWNER_ID:
+                try:
+                    # First sync to the specific guild for immediate testing
+                    if interaction.guild:
+                        await self.tree.sync(guild=discord.Object(id=interaction.guild.id))
+                        
+                    # Then sync globally
+                    synced = await self.tree.sync()
+                    
+                    await interaction.response.send_message(
+                        f"✅ Synced {len(synced)} commands globally!\n"
+                        f"Commands may take up to an hour to appear in all servers.",
+                        ephemeral=True
+                    )
+                    logger.info(f"Commands synced by owner. Synced {len(synced)} commands.")
+                except Exception as e:
+                    logger.error(f"Error syncing commands: {e}")
+                    await interaction.response.send_message(
+                        f"❌ Error syncing commands: {str(e)}",
+                        ephemeral=True
+                    )
+            else:
+                await interaction.response.send_message(
+                    "❌ You must be the bot owner to use this command!",
+                    ephemeral=True
+                )
 
     async def setup(self):
         """Set up the bot and start background tasks."""
         @self.client.event
         async def on_ready():
             logger.info(f'\033[32mLogged in as {self.client.user}\033[0m')
-            
-            # Sync commands only if needed
-            if not hasattr(self.client, 'synced') or not self.client.synced:
-                await self.tree.sync()
-                self.client.synced = True
-                logger.info("\033[32mCommands synced.\033[0m")
             
             # Set the connected event
             self.connected.set()
@@ -83,12 +115,15 @@ class SourceStalkerBot:
             if not channel:
                 logger.error(f"Could not find channel with ID {self.config.discord.channel_id}")
                 return
-
+            
             # Start spectator checker if not already running
             if not self.spectator_task or self.spectator_task.done():
-                self.spectator_task = await initialize_spectator(channel)
+                self.spectator_task = await initialize_spectator(channel, self.config_manager)
                 self.bg_tasks.append(self.spectator_task)
                 logger.info("\033[32mSpectator checker started.\033[0m")
+                
+            # Log that bot is ready, but don't sync commands here
+            logger.info("\033[32mBot is ready. Use /synccommands to manually sync commands.\033[0m")
 
         @self.client.event
         async def on_disconnect():
@@ -102,8 +137,9 @@ class SourceStalkerBot:
     async def run(self):
         """Run the bot with improved error handling and reconnection logic."""
         await self.setup()
-
+        
         # Initialize the API client for config setup
+        from riot_api_client import RiotAPIClient
         api_client = RiotAPIClient(
             api_key=self.config.riot.api_key,
             region=self.config.riot.region,
@@ -112,34 +148,43 @@ class SourceStalkerBot:
         await api_client.initialize()
         
         # Initialize summoner ID if needed
-        if not self.config.riot.summoner_id:
+        if not self.config.riot.summoner_id and self.config.riot.summoner_name:
             logger.info("Summoner ID not found in config, attempting to fetch...")
-            success = await self.config_manager.initialize_summoner_id(api_client)
-            if success:
-                logger.info(f"Successfully initialized summoner ID: {self.config.riot.summoner_id}")
-                # Update the local config reference
-                self.config = self.config_manager.config
-            else:
-                logger.error("Failed to initialize summoner ID. Please check summoner name and tag.")
+            try:
+                # Get summoner info by name
+                summoner_data = await api_client.request(
+                    f"/lol/summoner/v4/summoners/by-name/{self.config.riot.summoner_name}",
+                    region_override=self.config.riot.region
+                )
+                
+                if 'id' in summoner_data and 'puuid' in summoner_data:
+                    self.config.riot.summoner_id = summoner_data['id']
+                    self.config.riot.puuid = summoner_data['puuid']
+                    
+                    # Save to config
+                    config_dict = {
+                        'discord': asdict(self.config.discord),
+                        'riot': asdict(self.config.riot),
+                        'database': asdict(self.config.database),
+                        'messages': asdict(self.config.messages)
+                    }
+                    self.config_manager.save_config_dict(config_dict)
+                    
+                    logger.info(f"Initialized summoner ID: {summoner_data['id']}")
+                    logger.info(f"Initialized PUUID: {summoner_data['puuid']}")
+                else:
+                    logger.error(f"Failed to get summoner data: {summoner_data}")
+            except Exception as e:
+                logger.error(f"Error initializing summoner information: {e}")
         
         await api_client.close()
         
         try:
-            while True:
-                try:
-                    logger.info("Connecting to Discord...")
-                    await self.client.start(self.config.discord.bot_token)
-                except discord.errors.LoginFailure:
-                    logger.error("\033[91mInvalid Discord token\033[0m")
-                    return
-                except discord.errors.ConnectionClosed as e:
-                    logger.info(f"\033[91mConnection closed: {e}, reconnecting in 5 seconds...\033[0m")
-                    await asyncio.sleep(5)
-                except Exception as e:
-                    logger.error(f"\033[91mUnexpected error: {str(e)}\033[0m")
-                    await asyncio.sleep(5)
-        except asyncio.CancelledError:
-            logger.info("Bot shutdown initiated")
+            await self.client.start(self.config.discord.bot_token)
+        except discord.errors.LoginFailure:
+            logger.error("\033[91mInvalid Discord token\033[0m")
+        except Exception as e:
+            logger.error(f"\033[91mUnexpected error: {str(e)}\033[0m")
         finally:
             # Clean up resources
             await self.cleanup()
