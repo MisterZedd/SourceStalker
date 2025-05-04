@@ -229,16 +229,22 @@ class RiotAPIClient:
         base = self.platform if use_platform else (region_override or self.region)
         url = f"https://{base}.api.riotgames.com{endpoint}"
         
-        # Add API key to params
-        if params is None:
-            params = {}
-        params['api_key'] = self.api_key
+        # Set headers with API key
+        headers = {
+            'X-Riot-Token': self.api_key,
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Charset': 'application/x-www-form-urlencoded; charset=UTF-8'
+        }
         
         # Check cache if enabled and not forcing refresh
         if cache and not force_refresh:
             cached = self._get_cached_response(endpoint, params)
             if cached:
                 return cached
+            
+        # Log the request for debugging (but mask most of the API key)
+        masked_key = self.api_key[:8] + "..." + self.api_key[-8:] if len(self.api_key) > 16 else "***masked***"
+        logger.debug(f"Making request to: {url} with key: {masked_key}")
         
         # Wait until we can make a request
         can_proceed = await self._wait_for_rate_limit(endpoint)
@@ -250,7 +256,7 @@ class RiotAPIClient:
         # Make the request with retries
         for attempt in range(self.retry_attempts + 1):
             try:
-                async with self.session.request(method, url, params=params) as response:
+                async with self.session.request(method, url, params=params, headers=headers) as response:
                     # Update rate limits based on headers
                     if 'X-Method-Rate-Limit' in response.headers:
                         self._update_rate_limits(endpoint, response.headers)
@@ -261,6 +267,12 @@ class RiotAPIClient:
                         logger.warning(f"Rate limited. Retrying after {retry_after} seconds.")
                         await asyncio.sleep(retry_after)
                         continue
+                    elif response.status == 400:
+                        logger.error(f"Bad request (400) for URL: {url}")
+                        return {'status': {'status_code': 400, 'message': 'Bad request - check endpoint and parameters'}}
+                    elif response.status == 403:
+                        logger.error(f"Forbidden (403) for URL: {url} - Check API key permissions")
+                        return {'status': {'status_code': 403, 'message': 'Forbidden - check API key permissions'}}
                     
                     # Handle other errors
                     if response.status >= 400:
@@ -321,16 +333,35 @@ class RiotAPIClient:
         endpoint = f"/lol/match/v5/matches/{match_id}"
         return await self.request(endpoint, use_platform=True)
     
-    async def get_current_game(self, summoner_id: str, region: str = None) -> Dict:
-        """Get current game information."""
-        # Validate summoner_id to prevent malformed URLs
-        if not summoner_id or summoner_id.strip() == '':
-            logger.warning("Attempted to get current game with empty summoner ID")
-            return {'status': {'status_code': 400, 'message': 'Summoner ID is required'}}
+    async def get_puuid_by_summoner_id(self, summoner_id: str, region: str = None) -> Optional[str]:
+        """Get PUUID from summoner ID."""
+        if not summoner_id:
+            return None
+            
+        endpoint = f"/lol/summoner/v4/summoners/{summoner_id}"
+        summoner_data = await self.request(endpoint, region_override=region)
         
-        # Keep using v5 as shown in your documentation, but ensure proper URL formatting
-        endpoint = f"/lol/spectator/v5/active-games/by-summoner/{summoner_id.strip()}"
-        logger.debug(f"Requesting spectator data from endpoint: {endpoint}")
+        if 'puuid' in summoner_data:
+            return summoner_data['puuid']
+        return None
+    
+    async def get_current_game(self, summoner_id: str, puuid: str = None, region: str = None) -> Dict:
+        """Get current game information using PUUID if available, or summoner ID."""
+        # If PUUID is not provided, try to get it from summoner ID
+        if not puuid:
+            if not summoner_id:
+                logger.warning("Neither summoner ID nor PUUID provided")
+                return {'status': {'status_code': 400, 'message': 'ID required'}}
+                
+            puuid = await self.get_puuid_by_summoner_id(summoner_id, region)
+            if not puuid:
+                logger.warning(f"Failed to get PUUID for summoner ID: {summoner_id}")
+                return {'status': {'status_code': 404, 'message': 'PUUID not found'}}
+        
+        # Use v5 endpoint with PUUID
+        endpoint = f"/lol/spectator/v5/active-games/by-summoner/{puuid}"
+        logger.info(f"Making spectator request with PUUID")
+        
         return await self.request(endpoint, region_override=region)
     
     async def get_league_entries(self, summoner_id: str, region: str = None) -> List[Dict]:

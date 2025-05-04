@@ -6,9 +6,10 @@ import asyncio
 import logging
 import sys
 from typing import Optional, Tuple, Dict
+from dataclasses import asdict
 from datetime import datetime
 
-from config_manager import ConfigManager, initialize_summoner_id
+from config_manager import ConfigManager
 from riot_api_client import RiotAPIClient
 from db_manager import DBManager
 from utils.gamemodes import get_queue_type
@@ -28,6 +29,7 @@ class SpectatorChecker:
     """
     def __init__(self, config_manager: ConfigManager):
         """Initialize the spectator checker with configuration."""
+        self.config_manager = config_manager  # Store the entire config_manager
         self.config = config_manager.config
         self.game_in_progress = False
         self.current_game_id = None
@@ -56,6 +58,67 @@ class SpectatorChecker:
             'lp_gain': '<:lpgain:1317242337948340294>',
             'lp_loss': '<:lploss:1317242323465142312>'
         }
+
+    async def initialize_summoner_id(self) -> bool:
+        """Initialize summoner ID and PUUID if not already set"""
+        if self.config.riot.summoner_id:
+            # If we have the summoner ID but not PUUID, get the PUUID
+            if not self.config.riot.puuid:
+                logger.info("PUUID not found in config, fetching it")
+                puuid = await self.api_client.get_puuid_by_summoner_id(self.config.riot.summoner_id)
+                if puuid:
+                    self.config.riot.puuid = puuid
+                    logger.info(f"Retrieved PUUID from summoner ID: {puuid[:10]}...")
+                    
+                    # Save to config file
+                    config_dict = {
+                        'discord': asdict(self.config.discord),
+                        'riot': asdict(self.config.riot),
+                        'database': asdict(self.config.database),
+                        'messages': asdict(self.config.messages)
+                    }
+                    self.config_manager.save_config_dict(config_dict)
+                    return True
+            else:
+                return True
+                
+        # Neither summoner ID nor name is set
+        if not self.config.riot.summoner_name:
+            logger.error("Summoner name is not set in configuration")
+            return False
+                
+        try:
+            logger.info(f"Fetching summoner data for {self.config.riot.summoner_name}")
+            
+            # First try getting the summoner directly by name
+            summoner_data = await self.api_client.request(
+                f"/lol/summoner/v4/summoners/by-name/{self.config.riot.summoner_name}",
+                region_override=self.config.riot.region
+            )
+            
+            if 'id' in summoner_data and 'puuid' in summoner_data:
+                self.config.riot.summoner_id = summoner_data['id']
+                self.config.riot.puuid = summoner_data['puuid']
+                logger.info(f"Initialized summoner ID: {summoner_data['id']}")
+                logger.info(f"Initialized PUUID: {summoner_data['puuid'][:10]}...")
+                
+                # Save to config file
+                config_dict = {
+                    'discord': asdict(self.config.discord),
+                    'riot': asdict(self.config.riot),
+                    'database': asdict(self.config.database),
+                    'messages': asdict(self.config.messages)
+                }
+                self.config_manager.save_config_dict(config_dict)
+                
+                return True
+            else:
+                logger.error(f"Failed to get summoner data: {summoner_data}")
+            
+            return False
+        except Exception as e:
+            logger.error(f"Failed to initialize summoner ID and PUUID: {e}")
+            return False
 
     def get_display_name(self) -> str:
         """Get the name to use in messages."""
@@ -232,18 +295,20 @@ class SpectatorChecker:
                     async with self.game_check_lock:  # Use lock to prevent race conditions
                         # Validate summoner ID
                         if not self.config.riot.summoner_id or self.config.riot.summoner_id.strip() == '':
-                            logger.warning("Summoner ID is empty, attempting to fetch it")
-                            success = await ConfigManager.initialize_summoner_id(self.api_client)
+                            logger.info("Summoner ID is empty, attempting to fetch it")
+                            success = await self.initialize_summoner_id()
                             if not success:
-                                logger.error("Failed to get summoner ID. Waiting before retrying...")
+                                logger.error("Failed to initialize summoner ID. Waiting before retrying...")
                                 await asyncio.sleep(60)
                                 continue
                         
-                        # Now proceed with current game check
-                        logger.debug(f"Checking for active game with summoner ID: {self.config.riot.summoner_id}")
-                        game_data = await self.api_client.get_current_game(self.config.riot.summoner_id)
+                        # Check for active game
+                        logger.debug(f"Checking for active game with summoner ID: {self.config.riot.puuid}")
+                        game_data = await self.api_client.get_current_game(
+                                                                            summoner_id=self.config.riot.summoner_id,
+                                                                            puuid=self.config.riot.puuid
+                                                                        )
                         
-                        # Process the response
                         if 'status' in game_data:
                             status_code = game_data['status'].get('status_code')
                             if status_code == 401:
@@ -254,7 +319,7 @@ class SpectatorChecker:
                             elif status_code == 404:
                                 # 404 means not in game - normal case
                                 if self.game_in_progress:
-                                    # Game has ended, process results...
+                                    # Game has ended
                                     logger.info(f"Game ended - Processing results...")
                                     logger.info(f"Game ended with queue type: {self.current_queue_type}, pre-game queue type: {self.pre_game_queue_type}")
                                     
@@ -389,6 +454,43 @@ async def initialize_spectator(channel) -> asyncio.Task:
     Returns:
         asyncio.Task: The running spectator checker task
     """
-    config_manager = ConfigManager()
+    from pathlib import Path
+    from gui import launch_gui
+    
+    config_path = "config/config.json"
+    config_manager = ConfigManager(config_path)
+    
+    # Check if config file exists and has required fields
+    config_file = Path(config_path)
+    if not config_file.exists():
+        logger.warning(f"Config file not found at {config_path}")
+        logger.info("Launching GUI for configuration...")
+        # Create the config directory if it doesn't exist
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+        # Launch GUI in a separate process
+        import threading
+        gui_thread = threading.Thread(target=launch_gui, args=(config_manager,))
+        gui_thread.daemon = True
+        gui_thread.start()
+        # Wait for configuration to complete
+        logger.info("Please complete the configuration using the GUI and restart the bot.")
+        # Return an empty task that does nothing
+        return asyncio.create_task(asyncio.sleep(0))
+    
+    # Check if riot config has required fields
+    if not all([
+        config_manager.config.riot.api_key,
+        config_manager.config.riot.summoner_name,
+        config_manager.config.riot.summoner_tag
+    ]):
+        logger.error("Required Riot API configuration is missing. Please configure the bot using the GUI.")
+        logger.info("Launching GUI for configuration...")
+        import threading
+        gui_thread = threading.Thread(target=launch_gui, args=(config_manager,))
+        gui_thread.daemon = True
+        gui_thread.start()
+        # Return an empty task that does nothing
+        return asyncio.create_task(asyncio.sleep(0))
+    
     checker = SpectatorChecker(config_manager)
     return asyncio.create_task(checker.check_spectator(channel))

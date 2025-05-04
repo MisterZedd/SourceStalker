@@ -186,21 +186,10 @@ def main():
     # Start the bot
     bot = SourceStalkerBot(config_manager)
     
-    loop = asyncio.get_event_loop()
-    bot_task = None
-    
     try:
-        bot_task = loop.create_task(bot.run())
-        loop.run_until_complete(bot_task)
+        asyncio.run(bot.run())
     except KeyboardInterrupt:
         logger.info("\033[93mKeyboardInterrupt detected: Bot shutting down gracefully.\033[0m")
-        if bot_task and not bot_task.done():
-            bot_task.cancel()
-            loop.run_until_complete(bot_task)
-    except Exception as e:
-        logger.error(f"Fatal error: {str(e)}")
-    finally:
-        loop.close()
 
 if __name__ == "__main__":
     main()

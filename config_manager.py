@@ -29,6 +29,7 @@ class RiotConfig:
     summoner_tag: str
     region: str = "NA1"
     platform: str = "americas"
+    puuid: str = ""
 
 @dataclass
 class DatabaseConfig:
@@ -123,7 +124,8 @@ class ConfigManager:
                 summoner_name="",
                 summoner_tag="",
                 region="NA1",
-                platform="americas"
+                platform="americas",
+                puuid=""  # Add empty PUUID
             ),
             database=DatabaseConfig(
                 path="/app/rank_tracker.db",
@@ -154,21 +156,28 @@ class ConfigManager:
 
         return True, "Configuration is valid"
     
-    async def initialize_summoner_id(self, api_client) -> bool:
-        """Initialize summoner ID in configuration if missing"""
-        if self.config.riot.summoner_id:
+    async def initialize_summoner_id(self) -> bool:
+        """Initialize summoner ID if not already set"""
+        if self.config.riot.summoner_id and self.config.riot.summoner_id.strip():
             return True
             
+        # Check if summoner name and tag are set
+        if not self.config.riot.summoner_name or not self.config.riot.summoner_tag:
+            logger.error("Summoner name or tag is not set in configuration")
+            return False
+                
         try:
-            # Get account by Riot ID
-            account_data = await api_client.request(
+            logger.info(f"Fetching summoner ID for {self.config.riot.summoner_name}#{self.config.riot.summoner_tag}")
+            
+            # First attempt to get the account info by Riot ID
+            account_data = await self.api_client.request(
                 f"/riot/account/v1/accounts/by-riot-id/{self.config.riot.summoner_name}/{self.config.riot.summoner_tag}",
                 use_platform=True
             )
-            
+
             if 'puuid' in account_data:
                 # Get summoner data by PUUID
-                summoner_data = await api_client.request(
+                summoner_data = await self.api_client.request(
                     f"/lol/summoner/v4/summoners/by-puuid/{account_data['puuid']}"
                 )
                 
@@ -190,6 +199,16 @@ class ConfigManager:
         except Exception as e:
             logging.error(f"Failed to initialize summoner ID: {e}")
             return False
+        
+    # Add to config_manager.py
+    def get_config_dict(self) -> Dict[str, Any]:
+        """Get configuration as dictionary"""
+        return {
+            'discord': asdict(self.config.discord),
+            'riot': asdict(self.config.riot),
+            'database': asdict(self.config.database),
+            'messages': asdict(self.config.messages)
+        }
 
     @property
     def config(self) -> Config:
