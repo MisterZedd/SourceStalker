@@ -230,11 +230,144 @@ class SpectatorChecker:
             while True:
                 try:
                     async with self.game_check_lock:  # Use lock to prevent race conditions
-                        # Check for active game
+                        # Validate summoner ID
+                        if not self.config.riot.summoner_id or self.config.riot.summoner_id.strip() == '':
+                            logger.warning("Summoner ID is empty, attempting to fetch it")
+                            try:
+                                # Try to get summoner info from summoner name and tag
+                                logger.info(f"Fetching summoner ID for {self.config.riot.summoner_name}#{self.config.riot.summoner_tag}")
+                                
+                                # First attempt to get the account info by Riot ID
+                                account_data = await self.api_client.request(
+                                    f"/riot/account/v1/accounts/by-riot-id/{self.config.riot.summoner_name}/{self.config.riot.summoner_tag}",
+                                    use_platform=True
+                                )
+                                
+                                if 'puuid' in account_data:
+                                    # Now get the summoner data using the PUUID
+                                    summoner_data = await self.api_client.request(
+                                        f"/lol/summoner/v4/summoners/by-puuid/{account_data['puuid']}"
+                                    )
+                                    
+                                    if 'id' in summoner_data:
+                                        self.config.riot.summoner_id = summoner_data['id']
+                                        logger.info(f"Updated summoner ID to: {summoner_data['id']}")
+                                    else:
+                                        logger.error(f"Failed to get summoner data: {summoner_data}")
+                                        await asyncio.sleep(60)
+                                        continue
+                                else:
+                                    logger.error(f"Failed to find account: {account_data}")
+                                    await asyncio.sleep(60)
+                                    continue
+                            except Exception as e:
+                                logger.error(f"Error fetching summoner ID: {e}")
+                                await asyncio.sleep(60)
+                                continue
+                        
+                        # Now proceed with current game check
+                        logger.debug(f"Checking for active game with summoner ID: {self.config.riot.summoner_id}")
                         game_data = await self.api_client.get_current_game(self.config.riot.summoner_id)
                         
-                        if 'status' not in game_data or game_data['status'].get('status_code') != 404:
-                            # Game is in progress
+                        # Process the response
+                        if 'status' in game_data:
+                            status_code = game_data['status'].get('status_code')
+                            if status_code == 401:
+                                logger.error("Authentication error (401) - Check if API key is valid")
+                                # Wait longer before retrying on auth errors
+                                await asyncio.sleep(60)
+                                continue
+                            elif status_code == 404:
+                                # 404 means not in game - normal case
+                                if self.game_in_progress:
+                                    # Game has ended, process results...
+                                    logger.info(f"Game ended - Processing results...")
+                                    logger.info(f"Game ended with queue type: {self.current_queue_type}, pre-game queue type: {self.pre_game_queue_type}")
+                                    
+                                    # Mark game as not in progress
+                                    self.game_in_progress = False
+                                    
+                                    # Wait for match data to be available
+                                    await asyncio.sleep(30)
+                                    
+                                    try:
+                                        # Check match result
+                                        result, deaths, queue_type = await self.check_match_result(
+                                            self.current_game_id, 
+                                            self.current_queue_type
+                                        )
+                                        
+                                        # Send result message
+                                        display_name = self.get_display_name()
+                                        emoji = self.emoji_map['win'] if result == "won" else self.emoji_map['loss']
+                                        
+                                        if result == "won":
+                                            msg = self.config.messages.game_win.format(summoner_name=display_name)
+                                        else:
+                                            msg = self.config.messages.game_loss.format(summoner_name=display_name)
+                                        
+                                        await channel.send(f"{emoji} {msg}")
+                                        
+                                        # Send death count message for non-tournament games
+                                        if queue_type == 'TOURNAMENT':
+                                            await channel.send(f"{self.emoji_map['deaths']} Unable to display tournament death count... {self.emoji_map['copium']}")
+                                        elif deaths is not None:
+                                            death_msg = self.config.messages.death_count.format(
+                                                summoner_name=display_name,
+                                                deaths=deaths
+                                            )
+                                            if queue_type not in ['RANKED_SOLO_5x5', 'RANKED_FLEX_SR']:
+                                                death_msg += f" in {self.format_queue_type(queue_type)}"
+                                            await channel.send(f"{self.emoji_map['deaths']} {death_msg} {self.emoji_map['copium']}")
+                                        
+                                        # Process LP change for ranked games
+                                        if self.pre_game_queue_type and self.pre_game_queue_type == queue_type and self.pre_game_lp is not None:
+                                            logger.info(f"Processing LP change for {queue_type} - Pre-game LP: {self.pre_game_lp}")
+                                            
+                                            # Track rank changes
+                                            await self.track_rank_after_game(self.current_game_id)
+                                            await asyncio.sleep(5)  # Give time for DB update
+                                            
+                                            # Get post-game LP
+                                            post_game_lp = await self.get_latest_lp(self.pre_game_queue_type)
+                                            
+                                            if post_game_lp is not None:
+                                                lp_change = post_game_lp - self.pre_game_lp
+                                                logger.info(f"LP change calculated: {lp_change} ({self.pre_game_lp} -> {post_game_lp})")
+                                                
+                                                if lp_change > 0:
+                                                    msg = self.config.messages.lp_gain.format(
+                                                        summoner_name=display_name,
+                                                        lp_change=lp_change,
+                                                        queue_type=self.format_queue_type(queue_type)
+                                                    )
+                                                    await channel.send(f"{self.emoji_map['lp_gain']} {msg}")
+                                                else:
+                                                    msg = self.config.messages.lp_loss.format(
+                                                        summoner_name=display_name,
+                                                        lp_change=abs(lp_change),
+                                                        queue_type=self.format_queue_type(queue_type)
+                                                    )
+                                                    await channel.send(f"{self.emoji_map['lp_loss']} {msg}")
+                                            else:
+                                                logger.error(f"Could not get post-game LP for {queue_type}")
+                                        else:
+                                            logger.info(f"Skipping LP tracking - Queue type: {queue_type}, Pre-game LP: {self.pre_game_lp}")
+                                        
+                                    except Exception as e:
+                                        logger.error(f"Error processing game results: {str(e)}")
+                                    finally:
+                                        # Reset state variables
+                                        self.pre_game_lp = None
+                                        self.current_queue_type = None
+                                        self.pre_game_queue_type = None
+                                        self.current_game_id = None
+                            else:
+                                logger.warning(f"Unexpected status code: {status_code}")
+                                await asyncio.sleep(30)
+                                continue
+                        else:
+                            # Game is in progress (no status means success)
                             if not self.game_in_progress:
                                 logger.info("New game detected")
                                 
@@ -256,90 +389,6 @@ class SpectatorChecker:
                                 display_name = self.get_display_name()
                                 game_start_msg = self.config.messages.game_start.format(summoner_name=display_name)
                                 await channel.send(f"{self.emoji_map['monitoring']} {game_start_msg}")
-                                
-                        elif self.game_in_progress:
-                            # Game has ended
-                            logger.info(f"Game ended - Processing results...")
-                            logger.info(f"Game ended with queue type: {self.current_queue_type}, pre-game queue type: {self.pre_game_queue_type}")
-                            
-                            # Mark game as not in progress
-                            self.game_in_progress = False
-                            
-                            # Wait for match data to be available
-                            await asyncio.sleep(30)
-                            
-                            try:
-                                # Check match result
-                                result, deaths, queue_type = await self.check_match_result(
-                                    self.current_game_id, 
-                                    self.current_queue_type
-                                )
-                                
-                                # Send result message
-                                display_name = self.get_display_name()
-                                emoji = self.emoji_map['win'] if result == "won" else self.emoji_map['loss']
-                                
-                                if result == "won":
-                                    msg = self.config.messages.game_win.format(summoner_name=display_name)
-                                else:
-                                    msg = self.config.messages.game_loss.format(summoner_name=display_name)
-                                
-                                await channel.send(f"{emoji} {msg}")
-                                
-                                # Send death count message for non-tournament games
-                                if queue_type == 'TOURNAMENT':
-                                    await channel.send(f"{self.emoji_map['deaths']} Unable to display tournament death count... {self.emoji_map['copium']}")
-                                elif deaths is not None:
-                                    death_msg = self.config.messages.death_count.format(
-                                        summoner_name=display_name,
-                                        deaths=deaths
-                                    )
-                                    if queue_type not in ['RANKED_SOLO_5x5', 'RANKED_FLEX_SR']:
-                                        death_msg += f" in {self.format_queue_type(queue_type)}"
-                                    await channel.send(f"{self.emoji_map['deaths']} {death_msg} {self.emoji_map['copium']}")
-                                
-                                # Process LP change for ranked games
-                                if self.pre_game_queue_type and self.pre_game_queue_type == queue_type and self.pre_game_lp is not None:
-                                    logger.info(f"Processing LP change for {queue_type} - Pre-game LP: {self.pre_game_lp}")
-                                    
-                                    # Track rank changes
-                                    await self.track_rank_after_game(self.current_game_id)
-                                    await asyncio.sleep(5)  # Give time for DB update
-                                    
-                                    # Get post-game LP
-                                    post_game_lp = await self.get_latest_lp(self.pre_game_queue_type)
-                                    
-                                    if post_game_lp is not None:
-                                        lp_change = post_game_lp - self.pre_game_lp
-                                        logger.info(f"LP change calculated: {lp_change} ({self.pre_game_lp} -> {post_game_lp})")
-                                        
-                                        if lp_change > 0:
-                                            msg = self.config.messages.lp_gain.format(
-                                                summoner_name=display_name,
-                                                lp_change=lp_change,
-                                                queue_type=self.format_queue_type(queue_type)
-                                            )
-                                            await channel.send(f"{self.emoji_map['lp_gain']} {msg}")
-                                        else:
-                                            msg = self.config.messages.lp_loss.format(
-                                                summoner_name=display_name,
-                                                lp_change=abs(lp_change),
-                                                queue_type=self.format_queue_type(queue_type)
-                                            )
-                                            await channel.send(f"{self.emoji_map['lp_loss']} {msg}")
-                                    else:
-                                        logger.error(f"Could not get post-game LP for {queue_type}")
-                                else:
-                                    logger.info(f"Skipping LP tracking - Queue type: {queue_type}, Pre-game LP: {self.pre_game_lp}")
-                                
-                            except Exception as e:
-                                logger.error(f"Error processing game results: {str(e)}")
-                            finally:
-                                # Reset state variables
-                                self.pre_game_lp = None
-                                self.current_queue_type = None
-                                self.pre_game_queue_type = None
-                                self.current_game_id = None
                 
                 except asyncio.CancelledError:
                     logger.info("Spectator checker task cancelled")
