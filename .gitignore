@@ -19,3 +19,6 @@ ENV/
 
 #PNG files
 *.png
+
+#Excluding clear_commands.py
+clear_commands.py

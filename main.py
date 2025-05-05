@@ -10,6 +10,8 @@ import sys
 import argparse
 from pathlib import Path
 from dataclasses import asdict
+import time
+
 
 from config_manager import ConfigManager
 from spectator_checker import SpectatorChecker, initialize_spectator
@@ -25,7 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Your Discord user ID for the owner check
-OWNER_ID = 12345678901234567  # Replace with your actual ID
+OWNER_ID = 790621179421130773  # Replace with your actual ID
 
 class SourceStalkerBot:
     """
@@ -62,40 +64,56 @@ class SourceStalkerBot:
 
     def register_commands(self):
         """Register slash commands."""
-        # Clear existing commands first to avoid duplicates
+        # Store command handler references to ensure consistency
+        self.stalkmatches_command = self.command_handler.stalkmatches_command
+        self.livegame_command = self.command_handler.livegame_command 
+        self.stalkrank_command = self.command_handler.stalkrank_command
+        
+        # Clear existing commands
         self.tree.clear_commands(guild=None)
         
-        # Add commands from CommandHandler
-        self.tree.add_command(self.command_handler.stalkmatches_command)
-        self.tree.add_command(self.command_handler.livegame_command)
-        self.tree.add_command(self.command_handler.stalkrank_command)
+        # Add commands using direct references for consistency
+        self.tree.add_command(self.stalkmatches_command)
+        self.tree.add_command(self.livegame_command)
+        self.tree.add_command(self.stalkrank_command)
+        
+        logger.info("Commands registered successfully!")
         
         # Add sync command
         @self.tree.command(name="synccommands", description="Sync slash commands (owner only)")
         async def sync_command(interaction: discord.Interaction):
+            # Add immediate logging
+            logger.info(f"synccommands command received from {interaction.user.name}")
+            
             # Check if the user is the owner
             if interaction.user.id == OWNER_ID:
                 try:
+                    # Add deferred response
+                    await interaction.response.defer(ephemeral=True)
+                    logger.info("Syncing commands process started")
+                    
                     # First sync to the specific guild for immediate testing
                     if interaction.guild:
                         await self.tree.sync(guild=discord.Object(id=interaction.guild.id))
+                        logger.info(f"Synced commands to guild {interaction.guild.name}")
                         
                     # Then sync globally
                     synced = await self.tree.sync()
+                    logger.info(f"Synced {len(synced)} commands globally")
                     
-                    await interaction.response.send_message(
+                    await interaction.followup.send(
                         f"✅ Synced {len(synced)} commands globally!\n"
                         f"Commands may take up to an hour to appear in all servers.",
                         ephemeral=True
                     )
-                    logger.info(f"Commands synced by owner. Synced {len(synced)} commands.")
                 except Exception as e:
-                    logger.error(f"Error syncing commands: {e}")
-                    await interaction.response.send_message(
+                    logger.error(f"Error syncing commands: {str(e)}")
+                    await interaction.followup.send(
                         f"❌ Error syncing commands: {str(e)}",
                         ephemeral=True
                     )
             else:
+                logger.info(f"User {interaction.user.name} attempted to use synccommands but is not the owner")
                 await interaction.response.send_message(
                     "❌ You must be the bot owner to use this command!",
                     ephemeral=True
@@ -103,6 +121,10 @@ class SourceStalkerBot:
 
     async def setup(self):
         """Set up the bot and start background tasks."""
+        # Add a sync lock to prevent multiple syncs
+        self._sync_lock = asyncio.Lock()
+        self._last_sync_time = 0
+        
         @self.client.event
         async def on_ready():
             logger.info(f'\033[32mLogged in as {self.client.user}\033[0m')
@@ -116,14 +138,39 @@ class SourceStalkerBot:
                 logger.error(f"Could not find channel with ID {self.config.discord.channel_id}")
                 return
             
+            # Force sync to both guild and global scopes
+            if not hasattr(self, '_has_synced'):
+                logger.info("First startup sync - forcing command sync")
+                
+                # Register commands
+                self.register_commands()
+                
+                # Sync global commands
+                try:
+                    logger.info("Syncing global commands")
+                    global_commands = await self.tree.sync(guild=None)  # Explicitly use None for global commands
+                    logger.info(f"Synced {len(global_commands)} commands globally")
+                except Exception as e:
+                    logger.error(f"Error syncing global commands: {e}")
+
+                # Sync global to guild commands
+                for guild in self.client.guilds:
+                    try:
+                        logger.info(f"Syncing commands to guild: {guild.name} ({guild.id})")
+                        self.tree.copy_global_to(guild=discord.Object(id=guild.id))
+                        await self.tree.sync(guild=guild)
+                        logger.info(f"Synced global commands to guild {guild.name}")
+                    except Exception as e:
+                        logger.error(f"Error syncing commands to guild {guild.name}: {e}")
+
+                
+                self._has_synced = True
+            
             # Start spectator checker if not already running
             if not self.spectator_task or self.spectator_task.done():
                 self.spectator_task = await initialize_spectator(channel, self.config_manager)
                 self.bg_tasks.append(self.spectator_task)
                 logger.info("\033[32mSpectator checker started.\033[0m")
-                
-            # Log that bot is ready, but don't sync commands here
-            logger.info("\033[32mBot is ready. Use /synccommands to manually sync commands.\033[0m")
 
         @self.client.event
         async def on_disconnect():
