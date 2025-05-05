@@ -26,9 +26,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Your Discord user ID for the owner check
-OWNER_ID = 790621179421130773  # Replace with your actual ID
-
 class SourceStalkerBot:
     """
     Main bot class for the SourceStalker Discord Bot.
@@ -48,19 +45,26 @@ class SourceStalkerBot:
         intents = discord.Intents.default()
         intents.message_content = True  # Needed to read message content
         
-        self.client = discord.Client(intents=intents, reconnect=True)
+        # Pass the application ID during client initialization if known
+        self.client = discord.Client(
+            intents=intents, 
+            reconnect=True,
+            application_id=int(self.config.discord.application_id) if hasattr(self.config.discord, "application_id") and self.config.discord.application_id else None
+        )
         self.tree = app_commands.CommandTree(self.client)
         
         # Initialize command handler
         self.command_handler = CommandHandler(self.config_manager)
         
-        # Register commands
-        self.register_commands()
-        
         # Background tasks
         self.bg_tasks = []
         self.spectator_task = None
         self.connected = asyncio.Event()
+        
+        # Add a sync lock to prevent multiple syncs
+        self._sync_lock = asyncio.Lock()
+        self._last_sync_time = 0
+        self._initial_sync_done = False
 
     def register_commands(self):
         """Register slash commands."""
@@ -78,93 +82,53 @@ class SourceStalkerBot:
         self.tree.add_command(self.stalkrank_command)
         
         logger.info("Commands registered successfully!")
+
+    async def sync_commands(self):
+        """
+        Sync commands with proper rate limit handling.
         
-        # Add sync command
-        @self.tree.command(name="synccommands", description="Sync slash commands (owner only)")
-        async def sync_command(interaction: discord.Interaction):
-            # Add immediate logging
-            logger.info(f"synccommands command received from {interaction.user.name}")
-            
-            # Check if the user is the owner
-            if interaction.user.id == OWNER_ID:
-                try:
-                    # Add deferred response
-                    await interaction.response.defer(ephemeral=True)
-                    logger.info("Syncing commands process started")
-                    
-                    # First sync to the specific guild for immediate testing
-                    if interaction.guild:
-                        await self.tree.sync(guild=discord.Object(id=interaction.guild.id))
-                        logger.info(f"Synced commands to guild {interaction.guild.name}")
-                        
-                    # Then sync globally
-                    synced = await self.tree.sync()
-                    logger.info(f"Synced {len(synced)} commands globally")
-                    
-                    await interaction.followup.send(
-                        f"✅ Synced {len(synced)} commands globally!\n"
-                        f"Commands may take up to an hour to appear in all servers.",
-                        ephemeral=True
-                    )
-                except Exception as e:
-                    logger.error(f"Error syncing commands: {str(e)}")
-                    await interaction.followup.send(
-                        f"❌ Error syncing commands: {str(e)}",
-                        ephemeral=True
-                    )
-            else:
-                logger.info(f"User {interaction.user.name} attempted to use synccommands but is not the owner")
-                await interaction.response.send_message(
-                    "❌ You must be the bot owner to use this command!",
-                    ephemeral=True
-                )
+        Returns:
+            int: Number of commands synced
+        """
+        async with self._sync_lock:
+            # Check if we've synced recently (avoid rate limits)
+            current_time = time.time()
+            if current_time - self._last_sync_time < 60:  # Limit to once per minute
+                logger.warning("Command sync requested too soon after previous sync")
+                return 0
+                
+            try:
+                # Sync commands globally
+                logger.info("Syncing commands globally")
+                synced = await self.tree.sync()
+                self._last_sync_time = current_time
+                logger.info(f"Synced {len(synced)} commands globally")
+                return len(synced)
+            except Exception as e:
+                logger.error(f"Error syncing commands: {str(e)}")
+                return 0
 
     async def setup(self):
         """Set up the bot and start background tasks."""
-        # Add a sync lock to prevent multiple syncs
-        self._sync_lock = asyncio.Lock()
-        self._last_sync_time = 0
-        
         @self.client.event
         async def on_ready():
             logger.info(f'\033[32mLogged in as {self.client.user}\033[0m')
             
             # Set the connected event
             self.connected.set()
+            
+            # Register and sync commands on first ready event
+            if not self._initial_sync_done:
+                logger.info("First ready event - registering and syncing commands")
+                self.register_commands()
+                await self.sync_commands()
+                self._initial_sync_done = True
 
             # Get the channel to send updates to
             channel = self.client.get_channel(int(self.config.discord.channel_id))
             if not channel:
                 logger.error(f"Could not find channel with ID {self.config.discord.channel_id}")
                 return
-            
-            # Force sync to both guild and global scopes
-            if not hasattr(self, '_has_synced'):
-                logger.info("First startup sync - forcing command sync")
-                
-                # Register commands
-                self.register_commands()
-                
-                # Sync global commands
-                try:
-                    logger.info("Syncing global commands")
-                    global_commands = await self.tree.sync(guild=None)  # Explicitly use None for global commands
-                    logger.info(f"Synced {len(global_commands)} commands globally")
-                except Exception as e:
-                    logger.error(f"Error syncing global commands: {e}")
-
-                # Sync global to guild commands
-                for guild in self.client.guilds:
-                    try:
-                        logger.info(f"Syncing commands to guild: {guild.name} ({guild.id})")
-                        self.tree.copy_global_to(guild=discord.Object(id=guild.id))
-                        await self.tree.sync(guild=guild)
-                        logger.info(f"Synced global commands to guild {guild.name}")
-                    except Exception as e:
-                        logger.error(f"Error syncing commands to guild {guild.name}: {e}")
-
-                
-                self._has_synced = True
             
             # Start spectator checker if not already running
             if not self.spectator_task or self.spectator_task.done():
