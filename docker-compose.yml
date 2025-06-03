@@ -1,0 +1,18 @@
+version: '3.8'
+services:
+  sourcestalker:
+    build: .
+    container_name: sourcestalker-v3
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+      - ./emoji_assets:/app/emoji_assets
+    environment:
+      - TZ=UTC
+      - PYTHONUNBUFFERED=1
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
