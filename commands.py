@@ -149,7 +149,7 @@ class CommandHandler:
 
     async def get_summoner_info(self, force_refresh: bool = False) -> Optional[Dict]:
         """
-        Get summoner information, preferably from cache.
+        Get summoner information, preferably from cache or config.
         
         Args:
             force_refresh: Force a refresh from API
@@ -157,14 +157,28 @@ class CommandHandler:
         Returns:
             Optional[Dict]: Summoner information or None
         """
-        # Try to get from cache first
+        # If we have the data in config, use that
+        if self.config.riot.summoner_id and self.config.riot.puuid and not force_refresh:
+            return {
+                'id': self.config.riot.summoner_id,
+                'puuid': self.config.riot.puuid,
+                'name': self.config.riot.summoner_name,
+                'summonerName': self.config.riot.summoner_name
+            }
+        
+        # Try to get from cache
         if not force_refresh:
             cached_data = await self.db_manager.get_summoner_by_name(self.config.riot.summoner_name)
             if cached_data:
                 return cached_data
         
-        # Get from API
-        summoner_data = await self.api_client.get_summoner_by_name(self.config.riot.summoner_name)
+        # Get from API using PUUID if available
+        if self.config.riot.puuid:
+            endpoint = f"/lol/summoner/v4/summoners/by-puuid/{self.config.riot.puuid}"
+            summoner_data = await self.api_client.request(endpoint, region_override=self.config.riot.region)
+        else:
+            # Fallback to by-name (deprecated but might work for some regions)
+            summoner_data = await self.api_client.get_summoner_by_name(self.config.riot.summoner_name)
         
         if 'status' in summoner_data and 'status_code' in summoner_data['status']:
             logger.error(f"Failed to get summoner info: {summoner_data['status']['message']}")
@@ -175,17 +189,12 @@ class CommandHandler:
             puuid=summoner_data['puuid'],
             summoner_id=summoner_data['id'],
             account_id=summoner_data['accountId'],
-            name=summoner_data['name'],
+            name=summoner_data.get('name', self.config.riot.summoner_name),
             data=summoner_data
         )
         
         return summoner_data
-
-    @app_commands.command(
-        name="stalkmatches",
-        description="Check recent match history"
-    )
-    async def stalkmatches_command(self, interaction: discord.Interaction):
+    async def stalkmatches(self, interaction: discord.Interaction) -> None:
         """
         Handle the stalkmatches command.
         
@@ -221,6 +230,8 @@ class CommandHandler:
                 count=3
             )
             
+            logger.info(f"Match IDs response: {match_ids}")
+            
             if not match_ids or (isinstance(match_ids, dict) and 'status' in match_ids):
                 await interaction.followup.send(
                     f"No recent matches found for {self.config.riot.summoner_name}",
@@ -235,9 +246,14 @@ class CommandHandler:
                 tasks.append(self.api_client.get_match(match_id))
             
             match_results = await asyncio.gather(*tasks)
-            for result in match_results:
-                if 'status' not in result:
+            for i, result in enumerate(match_results):
+                logger.info(f"Match {i} result: {type(result)} - has status: {'status' in result if isinstance(result, dict) else 'not dict'}")
+                if isinstance(result, dict) and 'status' not in result:
                     match_details.append(result)
+                elif isinstance(result, dict) and 'status' in result:
+                    logger.warning(f"Match {i} has error status: {result['status']}")
+                else:
+                    logger.warning(f"Match {i} unexpected result type: {type(result)}")
             
             if not match_details:
                 await interaction.followup.send(
@@ -280,12 +296,20 @@ class CommandHandler:
             Optional[discord.Embed]: Match embed or None
         """
         try:
-            # Find the player in the match
-            participant = next(
-                (p for p in match_data['info']['participants'] 
-                 if p['summonerName'].lower() == self.config.riot.summoner_name.lower()),
-                None
-            )
+            # Find the player in the match using PUUID (more reliable than name)
+            participant = None
+            for p in match_data['info']['participants']:
+                if p['puuid'] == self.config.riot.puuid:
+                    participant = p
+                    break
+            
+            # Fallback to name matching if PUUID doesn't work
+            if not participant:
+                participant = next(
+                    (p for p in match_data['info']['participants'] 
+                     if p['summonerName'].lower() == self.config.riot.summoner_name.lower()),
+                    None
+                )
             
             if not participant:
                 return None
@@ -361,11 +385,7 @@ class CommandHandler:
             logger.error(f"Error creating match embed: {e}")
             return None
 
-    @app_commands.command(
-        name="livegame",
-        description="Get live game information"
-    )
-    async def livegame_command(self, interaction: discord.Interaction):
+    async def livegame(self, interaction: discord.Interaction) -> None:
         """
         Handle the livegame command.
         
@@ -394,8 +414,11 @@ class CommandHandler:
                 )
                 return
 
-            # Get live game data
-            game_data = await self.api_client.get_current_game(summoner['id'])
+            # Get live game data using PUUID
+            game_data = await self.api_client.get_current_game(
+                summoner_id=summoner['id'],
+                puuid=summoner['puuid']
+            )
             
             if 'status' in game_data:
                 if game_data['status'].get('status_code') == 404:
@@ -438,12 +461,20 @@ class CommandHandler:
             Optional[discord.Embed]: Live game embed or None
         """
         try:
-            # Find the player in the game
-            participant = next(
-                (p for p in game_data['participants'] 
-                 if p['summonerName'].lower() == self.config.riot.summoner_name.lower()),
-                None
-            )
+            # Find the player in the game using PUUID (more reliable than name)
+            participant = None
+            for p in game_data['participants']:
+                if p['puuid'] == self.config.riot.puuid:
+                    participant = p
+                    break
+            
+            # Fallback to name matching if PUUID doesn't work
+            if not participant:
+                participant = next(
+                    (p for p in game_data['participants'] 
+                     if p['summonerName'].lower() == self.config.riot.summoner_name.lower()),
+                    None
+                )
             
             if not participant:
                 return None
@@ -535,11 +566,7 @@ class CommandHandler:
             logger.error(f"Error creating live game embed: {e}")
             return None
 
-    @app_commands.command(
-        name="stalkrank",
-        description="Check current rank and rank history"
-    )
-    async def stalkrank_command(self, interaction: discord.Interaction):
+    async def stalkrank(self, interaction: discord.Interaction) -> None:
         """
         Handle the stalkrank command.
         
@@ -568,24 +595,62 @@ class CommandHandler:
                 )
                 return
 
-            # Get current rank
+            # Get current rank and calculate recent changes
             current_rank = rank_history[-1]  # Most recent entry
             tier = current_rank[0]
             division = current_rank[1]
             lp = current_rank[2]
+            
+            # Calculate LP changes and streak
+            recent_games = rank_history[-5:] if len(rank_history) >= 5 else rank_history
+            lp_changes = []
+            for i in range(1, len(recent_games)):
+                lp_diff = recent_games[i][2] - recent_games[i-1][2]
+                lp_changes.append(lp_diff)
+            
+            # Calculate win/loss streak (simplified based on LP changes)
+            streak = 0
+            streak_type = "wins" if lp_changes and lp_changes[-1] > 0 else "losses"
+            for lp_change in reversed(lp_changes):
+                if (lp_change > 0 and streak_type == "wins") or (lp_change < 0 and streak_type == "losses"):
+                    streak += 1
+                else:
+                    break
 
-            # Create rank embed
+            # Create enhanced rank embed
             embed = discord.Embed(
-                title=f"{self.config.riot.summoner_name}'s Current Rank",
-                color=discord.Color.blue()
+                title=f"{self.config.riot.summoner_name}'s Solo Queue Progress",
+                color=discord.Color.gold() if tier == "GOLD" else 
+                      discord.Color.teal() if tier == "PLATINUM" else
+                      discord.Color.green() if tier == "EMERALD" else
+                      discord.Color.blue()
             )
 
             # Add rank emoji and formatted rank string
             rank_emoji = get_rank_emoji(tier)
             rank_str = f"{rank_emoji} **{tier} {division} - {lp} LP**"
             embed.description = rank_str
+            
+            # Add streak information if significant
+            if streak >= 2:
+                streak_emoji = "🔥" if streak_type == "wins" else "💀"
+                embed.add_field(
+                    name="Current Streak",
+                    value=f"{streak_emoji} {streak} {streak_type} in a row",
+                    inline=True
+                )
+            
+            # Add recent LP changes
+            if lp_changes:
+                total_lp_change = sum(lp_changes)
+                change_emoji = "📈" if total_lp_change > 0 else "📉" if total_lp_change < 0 else "➡️"
+                embed.add_field(
+                    name="Recent LP Change",
+                    value=f"{change_emoji} {total_lp_change:+d} LP (last {len(lp_changes)} games)",
+                    inline=True
+                )
 
-            # Generate rank graph
+            # Generate enhanced rank graph
             try:
                 graph_buffer = generate_rank_graph(rank_history, [r[4] for r in rank_history])  # r[4] is match_id
                 if isinstance(graph_buffer, str):
@@ -599,11 +664,25 @@ class CommandHandler:
                 # Add graph as image
                 file = discord.File(graph_buffer, "rank_progression.png")
                 embed.set_image(url="attachment://rank_progression.png")
+                
+                # Add graph description
+                embed.add_field(
+                    name="📊 Graph Legend",
+                    value="🔺 Promotions • 🔻 Demotions • Colors = Rank Tiers",
+                    inline=False
+                )
+                
             except Exception as e:
                 logger.error(f"Error generating rank graph: {e}")
+                # Enhanced fallback information
                 embed.add_field(
-                    name="Note",
-                    value="Could not generate rank graph.",
+                    name="📊 Rank History",
+                    value=f"Showing {len(rank_history)} rank changes over 30 days",
+                    inline=False
+                )
+                embed.add_field(
+                    name="⚠️ Note",
+                    value="Rank visualization temporarily unavailable",
                     inline=False
                 )
                 file = None

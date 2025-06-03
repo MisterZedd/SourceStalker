@@ -1,8 +1,19 @@
-# SourceStalker Setup Guide for Windows
+# SourceStalker V3 Setup Guide
 
-## Prerequisites
+SourceStalker is a Discord bot that tracks League of Legends players with live game monitoring, match history, and rank progression visualization.
 
-Before beginning the setup process, you'll need to install the following software:
+## Setup Options
+
+Choose one of two setup methods:
+
+### Option A: Docker Setup (Recommended for Windows)
+### Option B: Native Python Setup (Recommended for Linux/macOS)
+
+---
+
+## Option A: Docker Setup (Windows)
+
+### Prerequisites
 
 1. **Docker Desktop for Windows**
    - Download from: https://www.docker.com/products/docker-desktop
@@ -20,18 +31,30 @@ Before beginning the setup process, you'll need to install the following softwar
    - Discord Bot Token
    - Riot Games API Key
 
-## Step-by-Step Setup Guide
+---
 
-### 1. Install Docker Desktop
+## Option B: Native Python Setup (Linux/macOS)
 
-1. Download Docker Desktop from the official website
-2. Run the installer
-3. Follow the installation prompts
-4. When prompted, enable WSL 2 installation
-5. Restart your computer when installation is complete
-6. Start Docker Desktop and ensure it's running properly (look for the Docker icon in your system tray)
+### Prerequisites
 
-### 2. Create a Discord Bot
+1. **Python 3.9+**
+   - Linux: `sudo apt install python3 python3-pip python3-venv` (Ubuntu/Debian)
+   - macOS: Install via Homebrew `brew install python` or download from python.org
+
+2. **Git**
+   - Linux: `sudo apt install git` (Ubuntu/Debian)
+   - macOS: `brew install git` or use Xcode Command Line Tools
+
+3. **Required Accounts/API Keys**
+   - Discord Developer Account  
+   - Discord Bot Token
+   - Riot Games API Key
+
+---
+
+## Common Setup Steps
+
+### 1. Create a Discord Bot
 
 1. Go to https://discord.com/developers/applications
 2. Click "New Application"
@@ -55,7 +78,7 @@ Before beginning the setup process, you'll need to install the following softwar
     - Use Slash Commands
 11. Copy the generated URL and use it to invite the bot to your server
 
-### 3. Get a Riot Games API Key
+### 2. Get a Riot Games API Key
 
 1. Go to https://developer.riotgames.com/
 2. Sign in with your Riot Developer account
@@ -63,68 +86,127 @@ Before beginning the setup process, you'll need to install the following softwar
 4. Wait for application approval
 5. Save the application API key for later use
 
-### 4. Set Up the Project
+---
 
-1. Open Command Prompt as Administrator
-2. Create a directory for the project:
+## Setup Instructions
+
+### Docker Setup (Windows)
+
+1. **Install Docker Desktop** (if not already installed)
+   - Download and install Docker Desktop
+   - Enable WSL 2 when prompted
+   - Restart your computer
+   - Ensure Docker is running (system tray icon)
+
+2. **Set Up the Project**
 ```cmd
 mkdir C:\SourceStalker
 cd C:\SourceStalker
-```
-
-3. Clone the repository:
-```cmd
 git clone [repository-url] .
-```
-
-4. Create required directories:
-```cmd
 mkdir config
 ```
 
-### 5. Configure the Bot
+3. **Download Emoji Assets**
+```cmd
+python scripts/download_assets.py
+```
 
-1. Start the container for the first time:
+4. **Configure and Run**
 ```cmd
 docker-compose up
 ```
 
-2. The configuration GUI will appear. Fill in:
-   - Discord Bot Token (from step 2)
-   - Discord Channel ID (Right-click the channel in Discord > Copy ID)
-   - Riot API Key (from step 3)
-   - Summoner Name and Tag
-   - Select your region
-   - Leave other settings at default unless you need to change them
+### Native Python Setup (Linux/macOS)
 
-3. Click "Save Configuration", then you can close the window. The bot is now running.
-
-### 6. Running the Bot
-
-After initial setup, you can:
-
-- Start the bot:
-```cmd
-docker-compose up -d
+1. **Set Up the Project**
+```bash
+git clone [repository-url] SourceStalker
+cd SourceStalker
 ```
 
-- Stop the bot:
-```cmd
-docker-compose down
+2. **Create Virtual Environment**
+```bash
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
-- View logs:
-```cmd
-docker-compose logs -f
+3. **Install Dependencies**
+```bash
+pip install -r requirements.txt
 ```
+
+4. **Download Emoji Assets**
+```bash
+python scripts/download_assets.py
+```
+
+5. **Create Config Directory**
+```bash
+mkdir config
+```
+
+6. **Run the Bot**
+```bash
+python main.py
+```
+
+---
+
+## Initial Configuration
+
+When you first run the bot, a configuration GUI will appear. Fill in:
+
+- **Discord Bot Token** (from Discord Developer Portal)
+- **Discord Channel ID** (Right-click channel in Discord > Copy ID)  
+- **Riot API Key** (from Riot Developer Portal)
+- **Summoner Name and Tag** (e.g., "PlayerName#NA1")
+- **Select your region** (NA1, EUW1, etc.)
+- Leave other settings at default unless you need to change them
+
+Click "Save Configuration", then you can close the window. The bot is now running.
+
+## Running the Bot
+
+### Docker Commands
+- Start: `docker-compose up -d`
+- Stop: `docker-compose down`
+- View logs: `docker-compose logs -f`
+
+### Native Python Commands  
+- Start: `python main.py` (with virtual environment activated)
+- Stop: Ctrl+C in terminal
 
 ## Available Commands
 
 Once the bot is running, you can use these commands in your Discord server:
 
-- `/stalkmatches` - View recent match history
-- `/livegame` - Check current game information
-- `/stalkrank` - View rank and progression
+- `/stalkmatches` - View recent match history with detailed stats and KDA
+- `/livegame` - Check if the player is in a game and see team compositions
+- `/stalkrank` - View current rank and 30-day rank progression graph
+- `/sync` - (Owner only) Manually sync slash commands if they're not working
+  - Use `/sync global_sync:True` to sync commands to all servers
+
+The bot will also automatically:
+- Monitor when the tracked player enters a game
+- Send notifications for game results (win/loss)
+- Track death count and LP changes after ranked games
+
+## Emoji Assets
+
+SourceStalker uses emoji assets for champions, ranks, and summoner spells. These are **not included in the repository** to keep it lightweight.
+
+### Download Assets
+Run this command after cloning the repository:
+```bash
+python scripts/download_assets.py
+```
+
+This will download:
+- Champion icons (emoji_assets/champions/)  
+- Rank icons (emoji_assets/ranks/)
+- Summoner spell icons (emoji_assets/spells/)
+
+**Note:** You'll need these assets for the bot to display champion emojis properly in Discord. The download script will automatically fetch the latest assets from Riot's CDN.
 
 ## Troubleshooting
 
@@ -147,10 +229,12 @@ Once the bot is running, you can use these commands in your Discord server:
 
 ### Bot Issues
 
-1. **Commands don't work**
-   - Ensure bot has proper permissions
-   - Try re-inviting the bot using the OAuth2 URL
-   - Verify slash commands are registered (may take up to an hour)
+1. **Commands don't work or show as "not synced"**
+   - Ensure bot has proper permissions and was invited with 'applications.commands' scope
+   - Bot owner can run `/sync` command to manually sync slash commands
+   - Commands sync automatically to the bot's guild on startup
+   - For global sync across all servers, use `/sync global_sync:True`
+   - Check bot logs for any sync errors during startup
 
 2. **Riot API errors**
    - Verify API key is valid and not expired

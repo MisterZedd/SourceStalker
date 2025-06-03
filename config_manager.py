@@ -1,3 +1,7 @@
+"""
+config_manager.py
+Configuration manager for the SourceStalker Discord Bot.
+"""
 import os
 import sys
 import json
@@ -20,6 +24,11 @@ class DiscordConfig:
     channel_id: str
     rate_limit: int = 10
     time_window: int = 120
+    application_id: str = ""  # Added application_id field
+    owner_id: str = ""  # Added owner_id field
+    development_mode: bool = False  # Added development mode flag
+    dev_guild_id: str = ""  # Added development guild ID
+    emoji_guild_id: str = ""  # Added emoji guild ID
 
 @dataclass
 class RiotConfig:
@@ -75,14 +84,55 @@ class ConfigManager:
             with open(self.config_path, 'r') as f:
                 data = json.load(f)
 
-            discord_config = DiscordConfig(**data['discord'])
-            riot_config = RiotConfig(**data['riot'])
-            database_config = DatabaseConfig(**data['database'])
+            # Create DiscordConfig with all fields (including new ones)
+            discord_fields = {
+                'bot_token': data['discord'].get('bot_token', ''),
+                'channel_id': data['discord'].get('channel_id', ''),
+                'rate_limit': data['discord'].get('rate_limit', 10),
+                'time_window': data['discord'].get('time_window', 120),
+                'application_id': data['discord'].get('application_id', ''),
+                'owner_id': data['discord'].get('owner_id', ''),
+                'development_mode': data['discord'].get('development_mode', False),
+                'dev_guild_id': data['discord'].get('dev_guild_id', ''),
+                'emoji_guild_id': data['discord'].get('emoji_guild_id', '')
+            }
+            discord_config = DiscordConfig(**discord_fields)
+            
+            # Create RiotConfig
+            riot_config = RiotConfig(
+                api_key=data['riot'].get('api_key', ''),
+                summoner_id=data['riot'].get('summoner_id', ''),
+                summoner_name=data['riot'].get('summoner_name', ''),
+                summoner_tag=data['riot'].get('summoner_tag', ''),
+                region=data['riot'].get('region', 'NA1'),
+                platform=data['riot'].get('platform', 'americas'),
+                puuid=data['riot'].get('puuid', '')
+            )
+            
+            # Create DatabaseConfig
+            database_config = DatabaseConfig(
+                path=data['database'].get('path', '/app/rank_tracker.db'),
+                check_interval=data['database'].get('check_interval', 10)
+            )
+            
+            # Create MessageConfig if present
+            message_config = None
+            if 'messages' in data:
+                message_config = MessageConfig(
+                    game_start=data['messages'].get('game_start', "{summoner_name} is in a game now! Monitoring..."),
+                    game_win=data['messages'].get('game_win', "{summoner_name} got carried!"),
+                    game_loss=data['messages'].get('game_loss', "{summoner_name} threw the game!"),
+                    death_count=data['messages'].get('death_count', "Amount of times {summoner_name} died: {deaths}"),
+                    lp_gain=data['messages'].get('lp_gain', "{summoner_name} gained {lp_change} LP in {queue_type}!"),
+                    lp_loss=data['messages'].get('lp_loss', "{summoner_name} lost {lp_change} LP in {queue_type}!"),
+                    nickname=data['messages'].get('nickname', "")
+                )
 
             self._config = Config(
                 discord=discord_config,
                 riot=riot_config,
-                database=database_config
+                database=database_config,
+                messages=message_config
             )
             return self._config
 
@@ -116,7 +166,12 @@ class ConfigManager:
                 bot_token="",
                 channel_id="",
                 rate_limit=10,
-                time_window=120
+                time_window=120,
+                application_id="",
+                owner_id="",
+                development_mode=False,
+                dev_guild_id="",
+                emoji_guild_id=""
             ),
             riot=RiotConfig(
                 api_key="",
@@ -125,7 +180,7 @@ class ConfigManager:
                 summoner_tag="",
                 region="NA1",
                 platform="americas",
-                puuid=""  # Add empty PUUID
+                puuid=""
             ),
             database=DatabaseConfig(
                 path="/app/rank_tracker.db",
@@ -142,8 +197,6 @@ class ConfigManager:
             return False, "Discord channel ID is required"
         if not config.riot.api_key:
             return False, "Riot API key is required"
-        if not config.riot.summoner_id:
-            return False, "Summoner ID is required"
         
         # Validate database path
         try:

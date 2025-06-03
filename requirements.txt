@@ -1,0 +1,31 @@
+# Discord Bot
+discord.py>=2.3.0
+
+# Async HTTP requests
+aiohttp>=3.9.0
+aiosqlite>=0.19.0
+
+# Data visualization
+matplotlib>=3.7.0
+numpy>=1.24.0
+
+# Image processing
+Pillow>=10.0.0
+
+# GUI (optional - only needed if running GUI)
+# Tkinter is usually included with Python on most systems
+
+# Standard library modules (included with Python)
+# asyncio
+# json
+# logging
+# sqlite3
+# datetime
+# pathlib
+# dataclasses
+# collections
+# threading
+# io
+# time
+# sys
+# os

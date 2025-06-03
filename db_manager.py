@@ -302,23 +302,22 @@ class DBManager:
         try:
             if queue_type:
                 return await self.fetch_all(
-                    '''
+                    f'''
                     SELECT tier, rank, lp, timestamp, match_id
                     FROM rank_data
-                    WHERE queue_type = ? AND timestamp >= datetime('now', '-? days')
+                    WHERE queue_type = ? AND timestamp >= datetime('now', '-{days} days')
                     ORDER BY timestamp ASC
                     ''',
-                    (queue_type, days)
+                    (queue_type,)
                 )
             else:
                 return await self.fetch_all(
-                    '''
+                    f'''
                     SELECT tier, rank, lp, timestamp, match_id
                     FROM rank_data
-                    WHERE timestamp >= datetime('now', '-? days')
+                    WHERE timestamp >= datetime('now', '-{days} days')
                     ORDER BY timestamp ASC
-                    ''',
-                    (days,)
+                    '''
                 )
         except Exception as e:
             logger.error(f"Error getting rank history: {e}")
