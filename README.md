@@ -6,8 +6,8 @@ SourceStalker is a Discord bot that tracks League of Legends players with live g
 
 Choose one of two setup methods:
 
-### Option A: Docker Setup (Recommended for Windows)
-### Option B: Native Python Setup (Recommended for Linux/macOS)
+### Option A: Docker Setup
+### Option B: Native Python Setup
 
 ---
 
@@ -33,7 +33,7 @@ Choose one of two setup methods:
 
 ---
 
-## Option B: Native Python Setup (Linux/macOS)
+## Option B: Native Python Setup
 
 ### Prerequisites
 
