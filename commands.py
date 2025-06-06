@@ -307,7 +307,7 @@ class CommandHandler:
             if not participant:
                 participant = next(
                     (p for p in match_data['info']['participants'] 
-                     if p['summonerName'].lower() == self.config.riot.summoner_name.lower()),
+                     if p.get('riotIdGameName', '').lower() == self.config.riot.summoner_name.lower()),
                     None
                 )
             
@@ -537,7 +537,7 @@ class CommandHandler:
             if not participant:
                 participant = next(
                     (p for p in game_data['participants'] 
-                     if p['summonerName'].lower() == self.config.riot.summoner_name.lower()),
+                     if p.get('riotIdGameName', '').lower() == self.config.riot.summoner_name.lower()),
                     None
                 )
             
@@ -585,7 +585,7 @@ class CommandHandler:
             for p in game_data['participants']:
                 champ = get_champion_name(p['championId'])
                 if p['teamId'] == player_team:
-                    if p['summonerName'] == self.config.riot.summoner_name:
+                    if p.get('riotIdGameName', '') == self.config.riot.summoner_name:
                         champ = f"__**{champ}**__"
                     allies.append(champ)
                 else:
