@@ -1176,16 +1176,16 @@ class ModernGUI:
         # Create test dialog
         test_dialog = tk.Toplevel(self.root)
         test_dialog.title("Connection Test")
-        test_dialog.geometry("400x300")
+        test_dialog.geometry("450x400")
         test_dialog.configure(bg=self.get_theme()['bg'])
         test_dialog.transient(self.root)
         test_dialog.grab_set()
         
         # Center the dialog
         test_dialog.update_idletasks()
-        x = (test_dialog.winfo_screenwidth() // 2) - (400 // 2)
-        y = (test_dialog.winfo_screenheight() // 2) - (300 // 2)
-        test_dialog.geometry(f"400x300+{x}+{y}")
+        x = (test_dialog.winfo_screenwidth() // 2) - (450 // 2)
+        y = (test_dialog.winfo_screenheight() // 2) - (400 // 2)
+        test_dialog.geometry(f"450x400+{x}+{y}")
         
         # Title
         title_label = tk.Label(

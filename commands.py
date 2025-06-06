@@ -327,6 +327,55 @@ class CommandHandler:
             cs = participant['totalMinionsKilled'] + participant.get('neutralMinionsKilled', 0)
             cs_per_min = cs / (game_duration / 60)
 
+            # Get additional stats
+            vision_score = participant.get('visionScore', 0)
+            damage_dealt = participant.get('totalDamageDealtToChampions', 0)
+            gold_earned = participant.get('goldEarned', 0)
+            
+            # Calculate comparative stats (with negative spin)
+            def get_negative_spin_stats():
+                all_participants = match_data['info']['participants']
+                player_team_id = participant['teamId']
+                player_position = participant.get('individualPosition', '')
+                
+                # Get team members
+                team_members = [p for p in all_participants if p['teamId'] == player_team_id]
+                
+                # Helper function to add ordinal suffix
+                def add_ordinal_suffix(num):
+                    if 11 <= num <= 13:
+                        return f"{num}th"
+                    suffixes = {1: 'st', 2: 'nd', 3: 'rd'}
+                    return f"{num}{suffixes.get(num % 10, 'th')}"
+                
+                # Team damage ranking (worst to best)
+                team_damage_sorted = sorted(team_members, key=lambda x: x.get('totalDamageDealtToChampions', 0))
+                damage_rank = len(team_damage_sorted) - team_damage_sorted.index(participant)
+                damage_spin = f"{add_ordinal_suffix(damage_rank)} lowest damage on team"
+                
+                # Team gold ranking (worst to best)  
+                team_gold_sorted = sorted(team_members, key=lambda x: x.get('goldEarned', 0))
+                gold_rank = len(team_gold_sorted) - team_gold_sorted.index(participant)
+                gold_spin = f"{add_ordinal_suffix(gold_rank)} lowest gold on team"
+                
+                # Team vision ranking (worst to best)
+                team_vision_sorted = sorted(team_members, key=lambda x: x.get('visionScore', 0))
+                vision_rank = len(team_vision_sorted) - team_vision_sorted.index(participant)
+                vision_spin = f"{add_ordinal_suffix(vision_rank)} lowest vision on team"
+                
+                # Lane opponent comparison (if available)
+                lane_opponent = None
+                if player_position:
+                    opponents = [p for p in all_participants 
+                               if p['teamId'] != player_team_id and 
+                                  p.get('individualPosition') == player_position]
+                    if opponents:
+                        lane_opponent = opponents[0]
+                
+                return damage_spin, gold_spin, vision_spin, lane_opponent
+            
+            damage_spin, gold_spin, vision_spin, lane_opponent = get_negative_spin_stats()
+
             # Create the embed
             embed_color = discord.Color.green() if participant['win'] else discord.Color.red()
             embed = discord.Embed(
@@ -368,6 +417,22 @@ class CommandHandler:
             embed.add_field(
                 name="Time Ago",
                 value=relative_time,
+                inline=True
+            )
+            # Add new fields with negative spin
+            embed.add_field(
+                name="Vision Score",
+                value=f"{vision_score} ({vision_spin})",
+                inline=True
+            )
+            embed.add_field(
+                name="Damage",
+                value=f"{damage_dealt:,} ({damage_spin})",
+                inline=True
+            )
+            embed.add_field(
+                name="Gold",
+                value=f"{gold_earned:,} ({gold_spin})",
                 inline=True
             )
 
@@ -633,20 +698,18 @@ class CommandHandler:
             
             # Add streak information if significant
             if streak >= 2:
-                streak_emoji = "🔥" if streak_type == "wins" else "💀"
                 embed.add_field(
                     name="Current Streak",
-                    value=f"{streak_emoji} {streak} {streak_type} in a row",
+                    value=f"{streak} {streak_type} in a row",
                     inline=True
                 )
             
             # Add recent LP changes
             if lp_changes:
                 total_lp_change = sum(lp_changes)
-                change_emoji = "📈" if total_lp_change > 0 else "📉" if total_lp_change < 0 else "➡️"
                 embed.add_field(
                     name="Recent LP Change",
-                    value=f"{change_emoji} {total_lp_change:+d} LP (last {len(lp_changes)} games)",
+                    value=f"{total_lp_change:+d} LP (last {len(lp_changes)} games)",
                     inline=True
                 )
 
@@ -667,7 +730,7 @@ class CommandHandler:
                 
                 # Add graph description
                 embed.add_field(
-                    name="📊 Graph Legend",
+                    name="Graph Legend",
                     value="🔺 Promotions • 🔻 Demotions • Colors = Rank Tiers",
                     inline=False
                 )
@@ -676,12 +739,12 @@ class CommandHandler:
                 logger.error(f"Error generating rank graph: {e}")
                 # Enhanced fallback information
                 embed.add_field(
-                    name="📊 Rank History",
+                    name="Rank History",
                     value=f"Showing {len(rank_history)} rank changes over 30 days",
                     inline=False
                 )
                 embed.add_field(
-                    name="⚠️ Note",
+                    name="Note",
                     value="Rank visualization temporarily unavailable",
                     inline=False
                 )

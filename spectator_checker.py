@@ -129,6 +129,7 @@ class SpectatorChecker:
     async def get_latest_lp(self, queue_type: str, max_retries: int = 3, retry_delay: int = 1) -> Optional[int]:
         """
         Get the most recent LP value for the specific queue with retries.
+        Includes API fallback for bootstrap scenarios.
         
         Args:
             queue_type: Queue type (e.g., 'RANKED_SOLO_5x5')
@@ -140,14 +141,33 @@ class SpectatorChecker:
         """
         for attempt in range(max_retries):
             try:
+                logger.debug(f"Attempting to get latest LP for {queue_type} (attempt {attempt + 1}/{max_retries})")
                 rank_data = await self.db_manager.get_latest_rank(queue_type)
                 
                 if rank_data is None:
-                    logger.info(f"No data found for queue type: {queue_type}")
+                    logger.info(f"No database data found for {queue_type}, attempting API fallback")
+                    
+                    # Bootstrap fallback: Get current rank from API
+                    try:
+                        league_entries = await self.api_client.get_league_entries(self.config.riot.summoner_id)
+                        if league_entries and 'status' not in league_entries:
+                            for entry in league_entries:
+                                if entry.get('queueType') == queue_type:
+                                    api_lp = entry.get('leaguePoints')
+                                    logger.info(f"Bootstrap: Found {queue_type} LP from API: {api_lp}")
+                                    return api_lp
+                    except Exception as api_error:
+                        logger.warning(f"API fallback failed for {queue_type}: {api_error}")
+                    
                     if attempt < max_retries - 1:
                         logger.info(f"Retrying... (attempt {attempt + 1}/{max_retries})")
                         await asyncio.sleep(retry_delay)
                         continue
+                    
+                    # On final attempt, check if there's any rank data at all
+                    if attempt == max_retries - 1:
+                        all_queue_types = await self.db_manager.fetch_all("SELECT DISTINCT queue_type FROM rank_data")
+                        logger.info(f"Available queue types in database: {[qt[0] for qt in all_queue_types]}")
                     return None
 
                 tier, rank, lp = rank_data
@@ -155,12 +175,31 @@ class SpectatorChecker:
                 return lp
 
             except Exception as e:
-                logger.error(f"Error in get_latest_lp: {str(e)}")
+                logger.error(f"Error in get_latest_lp (attempt {attempt + 1}): {str(e)}")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(retry_delay)
                     continue
                 return None
 
+    def human_to_api_queue_type(self, human_queue_type: str) -> Optional[str]:
+        """
+        Convert human-readable queue type to API queue type format.
+        
+        Args:
+            human_queue_type: Human-readable queue type from get_queue_type()
+            
+        Returns:
+            str: API queue type or None if not a ranked queue
+        """
+        mapping = {
+            '5v5 Ranked Solo games': 'RANKED_SOLO_5x5',
+            '5v5 Ranked Flex games': 'RANKED_FLEX_SR'
+        }
+        result = mapping.get(human_queue_type)
+        if result is None and human_queue_type:
+            logger.info(f"Queue type '{human_queue_type}' is not a ranked queue, skipping rank tracking")
+        return result
+    
     def format_queue_type(self, queue_type: str, with_parentheses: bool = False) -> str:
         """
         Convert queue type to readable format.
@@ -173,9 +212,9 @@ class SpectatorChecker:
             str: Formatted queue type
         """
         mapping = {
-            'RANKED_SOLO_5x5': "Solo Queue",
-            'RANKED_FLEX_SR': "Flex",
-            'TOURNAMENT': "Tournament",
+            '5v5 Ranked Solo games': "Solo Queue",
+            '5v5 Ranked Flex games': "Flex",
+            'Tournament/Custom games': "Tournament",
             '5v5 ARAM games': "ARAM"
         }
         formatted = mapping.get(queue_type, "Unknown Queue")
@@ -199,7 +238,7 @@ class SpectatorChecker:
         try:
             # Get recent match IDs for the player
             match_ids = await self.api_client.get_match_list(
-                puuid=self.config.riot.summoner_id,
+                puuid=self.config.riot.puuid,
                 count=1
             )
             
@@ -224,8 +263,8 @@ class SpectatorChecker:
             
             # Find the player in the participants
             for participant in match_data['info']['participants']:
-                if participant['puuid'] == self.config.riot.summoner_id:
-                    deaths = None if queue_type == 'TOURNAMENT' else participant.get('deaths')
+                if participant['puuid'] == self.config.riot.puuid:
+                    deaths = None if queue_type == 'Tournament/Custom games' else participant.get('deaths')
                     logger.info(f"Found player in match data - Deaths: {deaths}")
                     
                     if participant['win']:
@@ -240,45 +279,74 @@ class SpectatorChecker:
             logger.error(f"Error in check_match_result: {str(e)}")
             return f"Error: {str(e)}", None, queue_type
 
-    async def track_rank_after_game(self, match_id: str) -> None:
+    async def track_rank_after_game(self, match_id: str, max_retries: int = 3) -> None:
         """
-        Track rank changes after a game.
+        Track rank changes after a game with retry logic.
         
         Args:
             match_id: Match ID
+            max_retries: Maximum retry attempts for API calls
         """
-        try:
-            # Get league entries
-            league_entries = await self.api_client.get_league_entries(self.config.riot.summoner_id)
-            
-            if not league_entries or 'status' in league_entries:
-                logger.error("Failed to get league entries.")
-                return
-            
-            # Process both solo and flex queue data
-            for entry in league_entries:
-                try:
-                    queue_type = entry.get('queueType')
-                    tier = entry.get('tier')
-                    rank = entry.get('rank')
-                    lp = entry.get('leaguePoints')
-                    
-                    if all([queue_type, tier, rank, lp is not None]):
-                        logger.info(f"Processing {queue_type} data - Tier: {tier}, Rank: {rank}, LP: {lp}")
-                        await self.db_manager.store_rank_data(
-                            match_id=match_id,
-                            queue_type=queue_type,
-                            tier=tier,
-                            rank=rank,
-                            lp=lp
-                        )
-                except KeyError as e:
-                    logger.error(f"Missing required field in league entry: {e}")
-                except Exception as e:
-                    logger.error(f"Error processing league entry: {e}")
-            
-        except Exception as e:
-            logger.error(f"Error in track_rank_after_game: {e}")
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Tracking rank after game (attempt {attempt + 1}/{max_retries}): {match_id}")
+                
+                # Get league entries with retry
+                league_entries = await self.api_client.get_league_entries(self.config.riot.summoner_id)
+                
+                if not league_entries or 'status' in league_entries:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Failed to get league entries (attempt {attempt + 1}), retrying...")
+                        await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                        continue
+                    else:
+                        logger.error(f"Failed to get league entries after {max_retries} attempts: {league_entries}")
+                        return
+                
+                logger.info(f"Retrieved {len(league_entries)} league entries")
+                
+                # Process both solo and flex queue data
+                entries_processed = 0
+                for entry in league_entries:
+                    try:
+                        queue_type = entry.get('queueType')
+                        tier = entry.get('tier')
+                        rank = entry.get('rank')
+                        lp = entry.get('leaguePoints')
+                        
+                        logger.info(f"Processing league entry: {queue_type} - {tier} {rank} {lp}LP")
+                        
+                        if all([queue_type, tier, rank, lp is not None]):
+                            success = await self.db_manager.store_rank_data(
+                                match_id=match_id,
+                                queue_type=queue_type,
+                                tier=tier,
+                                rank=rank,
+                                lp=lp
+                            )
+                            
+                            if success:
+                                entries_processed += 1
+                                logger.info(f"Successfully stored rank data for {queue_type}")
+                            else:
+                                logger.info(f"No rank change detected for {queue_type}")
+                        else:
+                            logger.warning(f"Incomplete league entry data: {entry}")
+                            
+                    except KeyError as e:
+                        logger.error(f"Missing required field in league entry: {e}")
+                    except Exception as e:
+                        logger.error(f"Error processing league entry: {e}")
+                
+                logger.info(f"Rank tracking completed. Processed {entries_processed} entries.")
+                return  # Success, exit retry loop
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Error in track_rank_after_game (attempt {attempt + 1}): {e}, retrying...")
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    logger.error(f"Error in track_rank_after_game after {max_retries} attempts: {e}")
 
     async def check_spectator(self, channel) -> None:
         """
@@ -331,10 +399,12 @@ class SpectatorChecker:
                                     
                                     try:
                                         # Check match result
+                                        logger.info(f"Checking match result for game: {self.current_game_id}")
                                         result, deaths, queue_type = await self.check_match_result(
                                             self.current_game_id, 
                                             self.current_queue_type
                                         )
+                                        logger.info(f"Match result: {result}, Deaths: {deaths}, Queue: {queue_type}")
                                         
                                         # Send result message
                                         display_name = self.get_display_name()
@@ -348,32 +418,62 @@ class SpectatorChecker:
                                         await channel.send(f"{emoji} {msg}")
                                         
                                         # Send death count message for non-tournament games
-                                        if queue_type == 'TOURNAMENT':
+                                        if queue_type == 'Tournament/Custom games':
                                             await channel.send(f"{self.emoji_map['deaths']} Unable to display tournament death count... {self.emoji_map['copium']}")
                                         elif deaths is not None:
                                             death_msg = self.config.messages.death_count.format(
                                                 summoner_name=display_name,
                                                 deaths=deaths
                                             )
-                                            if queue_type not in ['RANKED_SOLO_5x5', 'RANKED_FLEX_SR']:
+                                            if queue_type not in ['5v5 Ranked Solo games', '5v5 Ranked Flex games']:
                                                 death_msg += f" in {self.format_queue_type(queue_type)}"
                                             await channel.send(f"{self.emoji_map['deaths']} {death_msg} {self.emoji_map['copium']}")
                                         
-                                        # Process LP change for ranked games
-                                        if self.pre_game_queue_type and self.pre_game_queue_type == queue_type and self.pre_game_lp is not None:
-                                            logger.info(f"Processing LP change for {queue_type} - Pre-game LP: {self.pre_game_lp}")
+                                        # Process rank tracking and LP change for ranked games
+                                        current_api_queue_type = self.human_to_api_queue_type(queue_type)
+                                        logger.info(f"Current API queue type: {current_api_queue_type}, Pre-game queue type: {self.pre_game_queue_type}")
+                                        
+                                        if current_api_queue_type:  # Any ranked game
+                                            logger.info(f"Processing rank tracking for {queue_type}")
                                             
-                                            # Track rank changes
-                                            await self.track_rank_after_game(self.current_game_id)
-                                            await asyncio.sleep(5)  # Give time for DB update
-                                            
-                                            # Get post-game LP
-                                            post_game_lp = await self.get_latest_lp(self.pre_game_queue_type)
-                                            
-                                            if post_game_lp is not None:
-                                                lp_change = post_game_lp - self.pre_game_lp
-                                                logger.info(f"LP change calculated: {lp_change} ({self.pre_game_lp} -> {post_game_lp})")
+                                            # Always track rank changes for ranked games
+                                            try:
+                                                # Get the most recent match ID for this game
+                                                recent_match_ids = await self.api_client.get_match_list(
+                                                    puuid=self.config.riot.puuid,
+                                                    count=1
+                                                )
+                                                actual_match_id = recent_match_ids[0] if recent_match_ids else self.current_game_id
+                                                logger.info(f"Using match ID for rank tracking: {actual_match_id}")
                                                 
+                                                await self.track_rank_after_game(actual_match_id)
+                                                await asyncio.sleep(5)  # Give time for DB update
+                                            except Exception as e:
+                                                logger.error(f"Error in rank tracking: {e}")
+                                                # Fallback to original game ID
+                                                await self.track_rank_after_game(self.current_game_id)
+                                            
+                                            # Calculate LP change - try pre/post comparison first
+                                            lp_change = None
+                                            if self.pre_game_queue_type == current_api_queue_type and self.pre_game_lp is not None:
+                                                # Use pre-game LP if available
+                                                post_game_lp = await self.get_latest_lp(current_api_queue_type)
+                                                if post_game_lp is not None:
+                                                    lp_change = post_game_lp - self.pre_game_lp
+                                                    logger.info(f"LP change from pre/post: {lp_change} ({self.pre_game_lp} -> {post_game_lp})")
+                                            
+                                            # Fallback: Calculate from recent database entries
+                                            if lp_change is None:
+                                                try:
+                                                    recent_history = await self.db_manager.get_rank_history(current_api_queue_type, days=1)
+                                                    if len(recent_history) >= 2:
+                                                        lp_change = recent_history[-1][2] - recent_history[-2][2]  # Latest LP - Previous LP
+                                                        logger.info(f"LP change from database history: {lp_change}")
+                                                except Exception as e:
+                                                    logger.warning(f"Could not calculate LP change from database: {e}")
+                                            
+                                            # Send LP change message if we have it
+                                            if lp_change is not None:
                                                 if lp_change > 0:
                                                     msg = self.config.messages.lp_gain.format(
                                                         summoner_name=display_name,
@@ -381,17 +481,18 @@ class SpectatorChecker:
                                                         queue_type=self.format_queue_type(queue_type)
                                                     )
                                                     await channel.send(f"{self.emoji_map['lp_gain']} {msg}")
-                                                else:
+                                                elif lp_change < 0:
                                                     msg = self.config.messages.lp_loss.format(
                                                         summoner_name=display_name,
                                                         lp_change=abs(lp_change),
                                                         queue_type=self.format_queue_type(queue_type)
                                                     )
                                                     await channel.send(f"{self.emoji_map['lp_loss']} {msg}")
+                                                # If lp_change == 0, no message (no LP change)
                                             else:
-                                                logger.error(f"Could not get post-game LP for {queue_type}")
+                                                logger.info(f"Could not determine LP change for {queue_type}")
                                         else:
-                                            logger.info(f"Skipping LP tracking - Queue type: {queue_type}, Pre-game LP: {self.pre_game_lp}")
+                                            logger.info(f"Non-ranked game - skipping LP tracking for {queue_type}")
                                         
                                     except Exception as e:
                                         logger.error(f"Error processing game results: {str(e)}")
@@ -415,10 +516,11 @@ class SpectatorChecker:
                                 self.current_queue_type = get_queue_type(queue_id)
                                 
                                 # Store pre-game LP for ranked games
-                                if self.current_queue_type in ['RANKED_SOLO_5x5', 'RANKED_FLEX_SR']:
-                                    self.pre_game_lp = await self.get_latest_lp(self.current_queue_type)
-                                    self.pre_game_queue_type = self.current_queue_type
-                                    logger.info(f"Pre-game LP: {self.pre_game_lp}")
+                                api_queue_type = self.human_to_api_queue_type(self.current_queue_type)
+                                if api_queue_type:
+                                    self.pre_game_lp = await self.get_latest_lp(api_queue_type)
+                                    self.pre_game_queue_type = api_queue_type
+                                    logger.info(f"Pre-game LP for {api_queue_type}: {self.pre_game_lp}")
                                 
                                 # Mark game as in progress
                                 self.game_in_progress = True
