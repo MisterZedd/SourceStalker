@@ -10,6 +10,76 @@ from config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
 
+class GameSession:
+    """Represents a gaming session - a cluster of games played within a time window."""
+    
+    def __init__(self, first_game_data: Tuple):
+        """Initialize session with the first game."""
+        self.start_time = datetime.strptime(first_game_data[3], "%Y-%m-%d %H:%M:%S")
+        self.end_time = self.start_time
+        self.games = [first_game_data]
+        self.start_rank = f"{first_game_data[0]} {first_game_data[1]}"
+        self.start_lp = first_game_data[2]
+        self.end_rank = self.start_rank
+        self.end_lp = self.start_lp
+        self.has_rank_change = False
+        
+    def add_game(self, game_data: Tuple) -> None:
+        """Add a game to this session."""
+        game_time = datetime.strptime(game_data[3], "%Y-%m-%d %H:%M:%S")
+        self.end_time = game_time
+        self.games.append(game_data)
+        
+        # Update end state
+        new_rank = f"{game_data[0]} {game_data[1]}"
+        if new_rank != self.end_rank:
+            self.has_rank_change = True
+        self.end_rank = new_rank
+        self.end_lp = game_data[2]
+    
+    def can_add_game(self, game_data: Tuple, max_gap_minutes: int = 45) -> bool:
+        """Check if a game can be added to this session based on time gap."""
+        game_time = datetime.strptime(game_data[3], "%Y-%m-%d %H:%M:%S")
+        gap = (game_time - self.end_time).total_seconds() / 60
+        return gap <= max_gap_minutes
+    
+    @property
+    def game_count(self) -> int:
+        """Number of games in this session."""
+        return len(self.games)
+    
+    @property
+    def net_lp_change(self) -> int:
+        """Net LP change during this session."""
+        return self.end_lp - self.start_lp
+    
+    @property
+    def duration_minutes(self) -> int:
+        """Duration of the session in minutes."""
+        return int((self.end_time - self.start_time).total_seconds() / 60)
+    
+    @property
+    def session_type(self) -> str:
+        """Classify the session type for visualization."""
+        if self.game_count == 1:
+            return "single"
+        elif self.has_rank_change:
+            return "rank_change"
+        elif self.net_lp_change > 0:
+            return "winning"
+        else:
+            return "losing"
+    
+    def get_summary_text(self) -> str:
+        """Get a text summary of the session for annotations."""
+        if self.game_count == 1:
+            return f"{self.end_lp} LP"
+        else:
+            if self.has_rank_change:
+                return f"{self.game_count} games\n{self.start_rank}→{self.end_rank}\n{self.net_lp_change:+d} LP"
+            else:
+                return f"{self.game_count} games\n{self.net_lp_change:+d} LP"
+
 class RankGraphGenerator:
     def __init__(self):
         self.full_rank_order = [
@@ -127,6 +197,71 @@ class RankGraphGenerator:
         visible_ranks = self.full_rank_order[visible_start:visible_end + 1]
         return visible_start, visible_end, visible_ranks
 
+    def cluster_games_into_sessions(self, rank_history: List[Tuple], max_gap_minutes: int = 45) -> List[GameSession]:
+        """
+        Cluster games into sessions based on time gaps.
+        
+        Args:
+            rank_history: List of rank data tuples (tier, rank, lp, timestamp, match_id)
+            max_gap_minutes: Maximum gap between games in the same session
+            
+        Returns:
+            List[GameSession]: Gaming sessions
+        """
+        if not rank_history:
+            return []
+            
+        # Sort by timestamp to ensure chronological order
+        sorted_history = sorted(rank_history, key=lambda x: datetime.strptime(x[3], "%Y-%m-%d %H:%M:%S"))
+        
+        sessions = []
+        current_session = None
+        
+        for game_data in sorted_history:
+            if current_session is None:
+                # Start first session
+                current_session = GameSession(game_data)
+            elif current_session.can_add_game(game_data, max_gap_minutes):
+                # Add to current session
+                current_session.add_game(game_data)
+            else:
+                # Gap too large, finish current session and start new one
+                sessions.append(current_session)
+                current_session = GameSession(game_data)
+        
+        # Don't forget the last session
+        if current_session is not None:
+            sessions.append(current_session)
+            
+        return sessions
+
+    def should_use_session_clustering(self, rank_history: List[Tuple]) -> bool:
+        """
+        Determine if session clustering would be beneficial for this data.
+        
+        Args:
+            rank_history: List of rank data tuples
+            
+        Returns:
+            bool: True if clustering should be used
+        """
+        if len(rank_history) < 5:
+            return False
+            
+        # Check for dense gaming patterns (multiple games within short time periods)
+        dates = [datetime.strptime(row[3], "%Y-%m-%d %H:%M:%S") for row in rank_history]
+        
+        # Count games within 2-hour windows
+        dense_periods = 0
+        for i, date in enumerate(dates):
+            games_in_window = sum(1 for other_date in dates[i:i+10] 
+                                if (other_date - date).total_seconds() <= 7200)  # 2 hours
+            if games_in_window >= 3:
+                dense_periods += 1
+                
+        # Use clustering if we have multiple dense periods
+        return dense_periods >= 2
+
     def generate_graph(self, rank_history: List[Tuple]) -> io.BytesIO:
         """Generate an enhanced rank progression graph"""
         try:
@@ -141,12 +276,28 @@ class RankGraphGenerator:
             recent_history = [row for row in rank_history 
                             if datetime.strptime(row[3], "%Y-%m-%d %H:%M:%S") >= cutoff_date]
 
-            all_dates = [datetime.strptime(row[3], "%Y-%m-%d %H:%M:%S") for row in recent_history]
-            all_ranks = [f"{row[0]} {row[1]}" for row in recent_history]
-            all_lp = [row[2] for row in recent_history]
-
-            # Intelligent filtering of significant points
-            dates, ranks, lps = self.filter_significant_points(all_dates, all_ranks, all_lp)
+            # Decide whether to use session clustering or individual games
+            use_clustering = self.should_use_session_clustering(recent_history)
+            
+            if use_clustering:
+                # Use session clustering for dense data
+                sessions = self.cluster_games_into_sessions(recent_history)
+                
+                # Extract session data for plotting
+                dates = [session.end_time for session in sessions]  # Use end time as plot point
+                ranks = [session.end_rank for session in sessions]
+                lps = [session.end_lp for session in sessions]
+                session_data = sessions  # Keep session objects for enhanced visualization
+                
+            else:
+                # Use traditional approach for sparse data
+                all_dates = [datetime.strptime(row[3], "%Y-%m-%d %H:%M:%S") for row in recent_history]
+                all_ranks = [f"{row[0]} {row[1]}" for row in recent_history]
+                all_lp = [row[2] for row in recent_history]
+                
+                # Intelligent filtering of significant points
+                dates, ranks, lps = self.filter_significant_points(all_dates, all_ranks, all_lp)
+                session_data = None
 
             # Convert ranks to numeric values with LP interpolation
             numeric_ranks = [self.calculate_rank_position(rank, lp) for rank, lp in zip(ranks, lps)]
@@ -165,52 +316,96 @@ class RankGraphGenerator:
                 start_rank = ranks[i]
                 end_rank = ranks[i + 1]
                 start_color = self.get_rank_color(start_rank)
-                end_color = self.get_rank_color(end_rank)
-                
-                # Use start color for the segment
-                segment_color = start_color
                 
                 # Plot line segment
                 plt.plot([dates[i], dates[i + 1]], 
                         [numeric_ranks[i] - visible_start, numeric_ranks[i + 1] - visible_start],
-                        color=segment_color, linewidth=3, alpha=0.8, zorder=2)
+                        color=start_color, linewidth=3, alpha=0.8, zorder=2)
 
-            # Plot points with tier colors and rank change markers
-            for i, (date, rank, lp, numeric_rank) in enumerate(zip(dates, ranks, lps, numeric_ranks)):
-                color = self.get_rank_color(rank)
-                
-                # Check if this is a promotion/demotion
-                is_promotion = i > 0 and numeric_rank > numeric_ranks[i-1] and ranks[i] != ranks[i-1]
-                is_demotion = i > 0 and numeric_rank < numeric_ranks[i-1] and ranks[i] != ranks[i-1]
-                
-                # Different markers for different events
-                if is_promotion:
-                    marker = '^'  # Triangle up for promotion
-                    size = 80
-                    edge_color = '#00FF00'
-                elif is_demotion:
-                    marker = 'v'  # Triangle down for demotion
-                    size = 80
-                    edge_color = '#FF4444'
-                else:
-                    marker = 'o'  # Circle for normal points
-                    size = 60
-                    edge_color = 'white'
-                
-                plt.scatter(date, numeric_rank - visible_start, 
-                          color=color, s=size, marker=marker,
-                          edgecolor=edge_color, linewidth=2, zorder=3)
-                
-                # Add LP annotations for significant points
-                if i == 0 or i == len(dates) - 1 or is_promotion or is_demotion:
-                    plt.annotate(f"{lp} LP", 
+            # Plot points - different logic for sessions vs individual games
+            if use_clustering and session_data:
+                # Session-based visualization
+                for i, (session, date, rank, lp, numeric_rank) in enumerate(zip(session_data, dates, ranks, lps, numeric_ranks)):
+                    color = self.get_rank_color(rank)
+                    
+                    # Session-specific styling
+                    if session.session_type == "single":
+                        marker = 'o'
+                        base_size = 60
+                        edge_color = 'white'
+                    elif session.session_type == "rank_change":
+                        marker = '^' if session.net_lp_change > 0 else 'v'
+                        base_size = 80
+                        edge_color = '#00FF00' if session.net_lp_change > 0 else '#FF4444'
+                    elif session.session_type == "winning":
+                        marker = 's'  # Square for winning sessions
+                        base_size = 70
+                        edge_color = '#00AA00'
+                    else:  # losing session
+                        marker = 's'  # Square for losing sessions
+                        base_size = 70
+                        edge_color = '#AA0000'
+                    
+                    # Scale size by game count (but not too dramatically)
+                    size = base_size + min(session.game_count * 8, 40)
+                    
+                    plt.scatter(date, numeric_rank - visible_start, 
+                              color=color, s=size, marker=marker,
+                              edgecolor=edge_color, linewidth=2, zorder=3)
+                    
+                    # Session annotations
+                    annotation_text = session.get_summary_text()
+                    
+                    # Position annotations to avoid overlap
+                    y_offset = 20 if i % 2 == 0 else -25
+                    va = 'bottom' if y_offset > 0 else 'top'
+                    
+                    plt.annotate(annotation_text,
                                 (date, numeric_rank - visible_start),
-                                xytext=(0, 15),
+                                xytext=(0, y_offset),
                                 textcoords='offset points',
-                                ha='center', va='bottom',
-                                fontsize=9, color='white', weight='bold',
-                                bbox=dict(boxstyle='round,pad=0.3', 
-                                         facecolor='black', alpha=0.8, edgecolor='none'))
+                                ha='center', va=va,
+                                fontsize=8, color='white', weight='bold',
+                                bbox=dict(boxstyle='round,pad=0.4', 
+                                         facecolor='black', alpha=0.9, edgecolor='none'))
+                                         
+            else:
+                # Traditional individual game visualization
+                for i, (date, rank, lp, numeric_rank) in enumerate(zip(dates, ranks, lps, numeric_ranks)):
+                    color = self.get_rank_color(rank)
+                    
+                    # Check if this is a promotion/demotion
+                    is_promotion = i > 0 and numeric_rank > numeric_ranks[i-1] and ranks[i] != ranks[i-1]
+                    is_demotion = i > 0 and numeric_rank < numeric_ranks[i-1] and ranks[i] != ranks[i-1]
+                    
+                    # Different markers for different events
+                    if is_promotion:
+                        marker = '^'  # Triangle up for promotion
+                        size = 80
+                        edge_color = '#00FF00'
+                    elif is_demotion:
+                        marker = 'v'  # Triangle down for demotion
+                        size = 80
+                        edge_color = '#FF4444'
+                    else:
+                        marker = 'o'  # Circle for normal points
+                        size = 60
+                        edge_color = 'white'
+                    
+                    plt.scatter(date, numeric_rank - visible_start, 
+                              color=color, s=size, marker=marker,
+                              edgecolor=edge_color, linewidth=2, zorder=3)
+                    
+                    # Add LP annotations for significant points
+                    if i == 0 or i == len(dates) - 1 or is_promotion or is_demotion:
+                        plt.annotate(f"{lp} LP", 
+                                    (date, numeric_rank - visible_start),
+                                    xytext=(0, 15),
+                                    textcoords='offset points',
+                                    ha='center', va='bottom',
+                                    fontsize=9, color='white', weight='bold',
+                                    bbox=dict(boxstyle='round,pad=0.3', 
+                                             facecolor='black', alpha=0.8, edgecolor='none'))
 
             # Format axes with shorter labels
             ax.xaxis.set_major_locator(mdates.DayLocator(interval=max(1, len(dates) // 8)))
@@ -235,19 +430,39 @@ class RankGraphGenerator:
             plt.title(f"Rank Progression: {current_rank} ({current_lp} LP)", 
                      fontsize=14, color="#E0E0E0", pad=25, weight='bold')
 
-            # Enhanced legend
+            # Dynamic legend based on visualization mode
             from matplotlib.lines import Line2D
-            legend_elements = [
-                Line2D([0], [0], marker='^', color='w', markerfacecolor='#00FF00', 
-                       markersize=8, label='Promotion', linestyle='None'),
-                Line2D([0], [0], marker='v', color='w', markerfacecolor='#FF4444', 
-                       markersize=8, label='Demotion', linestyle='None'),
-                Line2D([0], [0], marker='o', color='w', markerfacecolor='#888888', 
-                       markersize=8, label='LP Change', linestyle='None')
-            ]
+            
+            if use_clustering and session_data:
+                # Session-based legend
+                legend_elements = [
+                    Line2D([0], [0], marker='s', color='w', markerfacecolor='#00AA00', 
+                           markersize=8, label='Winning Sessions', linestyle='None'),
+                    Line2D([0], [0], marker='s', color='w', markerfacecolor='#AA0000', 
+                           markersize=8, label='Losing Sessions', linestyle='None'),
+                    Line2D([0], [0], marker='^', color='w', markerfacecolor='#00FF00', 
+                           markersize=8, label='Rank Up Sessions', linestyle='None'),
+                    Line2D([0], [0], marker='o', color='w', markerfacecolor='#888888', 
+                           markersize=6, label='Single Games', linestyle='None')
+                ]
+                legend_title = "Gaming Sessions (size = game count)"
+            else:
+                # Traditional legend
+                legend_elements = [
+                    Line2D([0], [0], marker='^', color='w', markerfacecolor='#00FF00', 
+                           markersize=8, label='Promotion', linestyle='None'),
+                    Line2D([0], [0], marker='v', color='w', markerfacecolor='#FF4444', 
+                           markersize=8, label='Demotion', linestyle='None'),
+                    Line2D([0], [0], marker='o', color='w', markerfacecolor='#888888', 
+                           markersize=8, label='LP Change', linestyle='None')
+                ]
+                legend_title = "Individual Games"
+                
             legend = plt.legend(handles=legend_elements, loc='upper left', 
                               facecolor='#1a1a1a', edgecolor='#444444', 
-                              fontsize=9, framealpha=0.9)
+                              fontsize=9, framealpha=0.9, title=legend_title)
+            legend.get_title().set_color('#E0E0E0')
+            legend.get_title().set_fontsize(9)
             for text in legend.get_texts():
                 text.set_color('#E0E0E0')
 
